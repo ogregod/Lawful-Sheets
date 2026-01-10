@@ -132,6 +132,7 @@ class LawfulManager extends FormApplication {
         }
         await game.settings.set(MODULE_ID, "userOverrides", newOverrides);
         ui.notifications.info("Lawful Sheets: Individual exceptions updated.");
+        // Reload to apply changes
         setTimeout(() => window.location.reload(), 500);
     }
 }
@@ -175,7 +176,11 @@ Hooks.once('init', () => {
 /* 4. THE ENFORCER (LOGIC)                              */
 /* ==================================================== */
 Hooks.on('ready', () => {
-    if (!game.user || game.user.role >= 3) return;
+    // Safety check: Ensure user exists
+    if (!game.user) return;
+    
+    // GMs and Assistants (Role 3+) are always immune to enforcement
+    if (game.user.role >= 3) return;
 
     const overrides = game.settings.get(MODULE_ID, "userOverrides");
     const myOverrides = overrides[game.user.id] || {};
@@ -214,17 +219,18 @@ Hooks.on('ready', () => {
 /* 5. SIDEBAR BUTTON (FIXED)                            */
 /* ==================================================== */
 Hooks.on('getSceneControlButtons', (controls) => {
+    // 1. SAFETY CHECK: Only GMs (Role 4) and Assistant GMs (Role 3) see this button.
     if (!game.user || game.user.role < 3) return;
 
-    // === THE FIX IS HERE ===
-    // Sometimes 'controls' is the array, sometimes it is the Wrapper Object.
-    // We check both possibilities to prevent the crash.
+    // 2. Compatibility Fix for v10/v11/v12 (Array vs Object Wrapper)
     const controlList = Array.isArray(controls) ? controls : controls.controls;
-
-    // Double check that we actually found the list before searching
+    
+    // 3. Ensure we have the list
     if (!controlList) return; 
 
+    // 4. Find the Token Layer controls (named "token")
     const tokenControls = controlList.find(c => c.name === "token");
+    
     if (tokenControls) {
         tokenControls.tools.push({
             name: "lawful-config",
