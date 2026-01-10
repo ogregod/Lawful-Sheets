@@ -49,14 +49,13 @@ class LawfulManager extends FormApplication {
         return foundry.utils.mergeObject(super.defaultOptions, {
             id: "lawful-manager",
             title: "Lawful Sheets: Citizen Management",
-            template: `modules/${MODULE_ID}/templates/manager.html`, // We will simulate this template in render
+            template: `modules/${MODULE_ID}/templates/manager.html`,
             width: 800,
             height: "auto",
             closeOnSubmit: true
         });
     }
 
-    // This generates the HTML for the menu dynamically
     render() {
         const overrides = game.settings.get(MODULE_ID, "userOverrides") || {};
         const globalSettings = {
@@ -69,7 +68,6 @@ class LawfulManager extends FormApplication {
 
         let rows = "";
         
-        // Loop through every player user (skip GMs)
         game.users.filter(u => u.role < 3).forEach(user => {
             const userSettings = overrides[user.id] || {};
             
@@ -116,28 +114,22 @@ class LawfulManager extends FormApplication {
         </form>
         `;
 
-        // Inject content directly to avoid needing a separate HTML file
         this._element = $(content);
         this._element.submit(e => {
             e.preventDefault();
             this._onSubmit(e);
         });
         
-        // Open the window
         super.render(true);
     }
 
     async _updateObject(event, formData) {
-        // formData comes in as { "userid.context": "val", "userid.toggles": "val" }
-        // We need to nest it back into objects
         const newOverrides = {};
-        
         for (let [key, value] of Object.entries(formData)) {
             const [userId, rule] = key.split(".");
             if (!newOverrides[userId]) newOverrides[userId] = {};
             newOverrides[userId][rule] = value;
         }
-
         await game.settings.set(MODULE_ID, "userOverrides", newOverrides);
         ui.notifications.info("Lawful Sheets: Individual exceptions updated.");
         setTimeout(() => window.location.reload(), 500);
@@ -148,16 +140,13 @@ class LawfulManager extends FormApplication {
 /* 3. SETTINGS REGISTRATION                             */
 /* ==================================================== */
 Hooks.once('init', () => {
-    
-    // 1. HIDDEN SETTING: Stores the User Overrides (The Bob vs Sussy logic)
     game.settings.register(MODULE_ID, "userOverrides", {
         scope: "world",
-        config: false, // Hidden from standard menu
+        config: false,
         type: Object,
         default: {}
     });
 
-    // 2. GLOBAL DEFAULTS (The Role Logic)
     const registerGlobal = (key, name) => {
         game.settings.register(MODULE_ID, key, {
             name: `Global: ${name}`,
@@ -186,7 +175,6 @@ Hooks.once('init', () => {
 /* 4. THE ENFORCER (LOGIC)                              */
 /* ==================================================== */
 Hooks.on('ready', () => {
-    // Immunity for GMs
     if (!game.user || game.user.role >= 3) return;
 
     const overrides = game.settings.get(MODULE_ID, "userOverrides");
@@ -195,15 +183,11 @@ Hooks.on('ready', () => {
     
     let cssPenalties = "";
 
-    // The Logic: 1. Check Override -> 2. Check Global
     const isGuilty = (ruleKey, globalKey) => {
         const userRule = myOverrides[ruleKey];
-        
-        // A. Priority: Individual Override
         if (userRule === "force-lock") return true;
         if (userRule === "force-unlock") return false;
-
-        // B. Fallback: Global Setting
+        
         const globalRule = game.settings.get(MODULE_ID, globalKey);
         if (globalRule === "all") return true;
         if (globalRule === "player" && !isTrusted) return true;
@@ -211,7 +195,6 @@ Hooks.on('ready', () => {
         return false;
     };
 
-    // Apply strictures
     if (isGuilty("context", "lockContext"))     cssPenalties += LAWS.context;
     if (isGuilty("toggles", "lockToggles"))     cssPenalties += LAWS.toggles;
     if (isGuilty("vitals", "lockVitals"))       cssPenalties += LAWS.vitals;
@@ -228,12 +211,20 @@ Hooks.on('ready', () => {
 });
 
 /* ==================================================== */
-/* 5. SIDEBAR BUTTON                                    */
+/* 5. SIDEBAR BUTTON (FIXED)                            */
 /* ==================================================== */
 Hooks.on('getSceneControlButtons', (controls) => {
     if (!game.user || game.user.role < 3) return;
 
-    const tokenControls = controls.find(c => c.name === "token");
+    // === THE FIX IS HERE ===
+    // Sometimes 'controls' is the array, sometimes it is the Wrapper Object.
+    // We check both possibilities to prevent the crash.
+    const controlList = Array.isArray(controls) ? controls : controls.controls;
+
+    // Double check that we actually found the list before searching
+    if (!controlList) return; 
+
+    const tokenControls = controlList.find(c => c.name === "token");
     if (tokenControls) {
         tokenControls.tools.push({
             name: "lawful-config",
@@ -241,7 +232,6 @@ Hooks.on('getSceneControlButtons', (controls) => {
             icon: "fas fa-gavel", 
             visible: true,
             onClick: () => {
-                // Opens our new custom Manager instead of standard settings
                 new LawfulManager().render(true);
             },
             button: true
