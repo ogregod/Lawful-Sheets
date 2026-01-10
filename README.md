@@ -1,151 +1,97 @@
-# Lawful-Sheets
-Lets keep these Player Sheets Lawful. 
-Hooks.on('ready', () => {
-    // 1. SAFETY CHECK: GMs must have full access.
-    if (!game.user || game.user.isGM) return;
+# Lawful Sheets
 
-    const style = document.createElement('style');
-    style.id = "global-dnd5e-lockdown";
-    style.innerHTML = `
-      /* ==================================================== */
-      /* SECTION 1: SURGICAL CONTEXT MENU FILTERING           */
-      /* ==================================================== */
-      /* We DO NOT hide the menu itself. We hide specific OPTIONS. */
+![Foundry Version](https://img.shields.io/badge/Foundry-v11%20%7C%20v12-orange)
+![Version](https://img.shields.io/badge/Version-1.0.2-blue)
+[![Latest Release](https://img.shields.io/github/v/release/ogregod/Lawful-Sheets?display_name=tag)](https://github.com/ogregod/Lawful-Sheets/releases/latest)
 
-      /* Target: Standard Right-Click Menu (#context-menu) 
-         and the "Three Dots" Dropdowns (.context-items) */
+**Let's keep these Player Sheets Lawful.**
 
-      /* 1. HIDE EDIT OPTIONS */
-      /* Finds any menu item containing an Edit/Pen icon */
-      #context-menu li.context-item:has(.fa-edit),
-      #context-menu li.context-item:has(.fa-pen),
-      #context-menu li.context-item:has(.fa-pen-to-square),
-      .context-menu li:has(.fa-edit),
-      .context-menu li:has(.fa-pen),
-      .context-menu li:has(.fa-pen-to-square) {
-          display: none !important;
-      }
+Lawful Sheets is a Foundry VTT module designed to enforce strict data integrity on Character Sheets. It uses surgical CSS injection to prevent players (or specific users) from modifying sensitive data like HP, Inventory quantities, or AC, while still allowing them to roll dice and use items.
 
-      /* 2. HIDE DELETE OPTIONS */
-      /* Finds any menu item containing a Trash icon */
-      #context-menu li.context-item:has(.fa-trash),
-      #context-menu li.context-item:has(.fa-trash-can),
-      .context-menu li:has(.fa-trash),
-      .context-menu li:has(.fa-trash-can) {
-          display: none !important;
-      }
+Gone are the days of *"oops, I accidentally deleted my sword"* or *"I thought I had 50 arrows."*
 
-      /* 3. HIDE DUPLICATE OPTIONS */
-      #context-menu li.context-item:has(.fa-copy),
-      .context-menu li:has(.fa-copy) {
-          display: none !important;
-      }
+## 🔒 Features
 
-      /* Note: "View Item", "Attune", "Equip" remain visible 
-         because they don't have the icons listed above. */
+Lawful Sheets doesn't just hide the sheet; it locks down specific interactions to keep the game "Read-Only" where it matters, and "Interactive" where it counts.
 
+### 1. Context Menu Filtering
+Prevents accidental deletions or modifications via right-click menus.
+* **Hides:** "Edit", "Delete", and "Duplicate" options.
+* **Keeps:** "View", "Attune", "Equip", and other non-destructive actions.
 
-      /* ==================================================== */
-      /* SECTION 2: GLOBAL EDIT TOGGLES (Header)              */
-      /* ==================================================== */
-      /* We still hide the global "Edit Mode" switch at the top */
-      
-      slide-toggle,
-      .mode-slider,
-      .toggle-editing,
-      .sheet-header .configure-sheet,
-      button.configure-sheet {
-          display: none !important;
-      }
+### 2. Header & Toggle Lockdown
+Removes the global "Edit Mode" switches found on many dnd5e sheets.
+* Hides the "Edit Mode" slider/toggle.
+* Hides the "Configure Sheet" (cogwheel) buttons.
 
+### 3. Vitals Protection (HP, AC, Stats)
+Prevents direct editing of the main stats block while ensuring buttons remain clickable.
+* **Locked:** HP, AC, Speed, Initiative inputs, and Attribute scores.
+* **Unlocked:** Rolling buttons (Saving Throws, Skill Checks, Rests).
 
-      /* ==================================================== */
-      /* SECTION 3: SIDEBAR / VITALS (Container Lock)         */
-      /* ==================================================== */
-      /* Keeps HP, AC, Speed locked by shielding the container */
+### 4. Inventory Control
+Ensures equipment lists remain static during play.
+* Hides the specific "Edit" and "Delete" icons on item rows.
+* Hides Quantity `+` and `-` buttons.
+* Locks "Uses" and "Quantity" input fields (preventing typing new numbers).
+* Prevents toggling "Equipped" or "Prepared" status.
 
-      .sheet.actor .sidebar,
-      .sheet.actor .vitals,
-      .sheet.actor .stats, 
-      .sheet.actor .meter-group {
-          pointer-events: none !important;
-      }
+### 5. Token HUD Restrictions
+Prevents players from modifying bar values (HP/Resource) directly from the Token HUD overlay.
 
-      /* Visual Cleanup */
-      .sheet.actor .sidebar input,
-      .sheet.actor .vitals input,
-      .sheet.actor .stats input {
-          background: transparent !important;
-          border: none !important;
-          box-shadow: none !important;
-          color: inherit !important;
-          cursor: default !important;
-      }
+---
 
-      /* EXCEPTION: Allow clicking Buttons (Rolls/Rests) */
-      .sheet.actor .sidebar button,
-      .sheet.actor .sidebar .rollable,
-      .sheet.actor .vitals button,
-      .sheet.actor .stats button {
-          pointer-events: auto !important;
-          cursor: pointer !important;
-      }
+## ⚙️ Configuration
 
+Lawful Sheets offers two layers of configuration: **Global Laws** and **Individual Exceptions**.
 
-      /* ==================================================== */
-      /* SECTION 4: INVENTORY & FEATURES                      */
-      /* ==================================================== */
+### Global Settings
+*Go to `Configure Settings` > `Lawful Sheets` to set the baseline laws for your world.*
 
-      /* Hide the dedicated "Edit" and "Delete" buttons on the row itself 
-         (The ones that appear on hover, NOT the three dots) */
-      .item-action.item-edit,
-      .item-action.item-delete,
-      .item-control.item-edit,
-      .item-control.item-delete {
-          display: none !important;
-      }
+For each category (Context Menus, Edit Mode, HP/Stats, Inventory, Token HUD), you can choose:
+* **Everyone Unlocked:** The module does nothing for this category.
+* **Players Locked:** Regular players are restricted; "Trusted" players and GMs are free.
+* **Everyone Locked:** All non-GM users are restricted.
 
-      /* Hide Quantity +/- Buttons */
-      .item-quantity .adjustment-button,
-      .item-quantity a[data-action],
-      button[data-action="increment"],
-      button[data-action="decrement"] {
-          display: none !important;
-      }
+### The Lawful Manager (Per-User Control)
+*Need to lock down a specific chaotic player, or give your trusted lieutenant editing rights?*
 
-      /* Lock Quantity & Uses Inputs */
-      .item-quantity input,
-      .item-uses input,
-      input[name="system.quantity"],
-      input[name="system.uses.value"],
-      input[name="system.uses.max"] {
-          pointer-events: none !important;
-          background: transparent !important;
-          border: none !important;
-      }
+1.  Open the **Token Controls** layer on the sidebar (the target icon).
+2.  Click the **Gavel Icon** (<i class="fas fa-gavel"></i>) labeled "Lawful Sheets: User Management".
+3.  This opens the **Citizen Management** window.
 
-      /* Lock Toggles (Equipped/Prepared Icons) */
-      .item-toggle,
-      .item-state-icon {
-          pointer-events: none !important;
-          cursor: default !important;
-      }
+Here you can override the global settings for each user:
+* **Default:** Follows the global setting.
+* **🔒 FORCE LOCK:** Locks this category for this user, regardless of their role.
+* **🔓 FORCE UNLOCK:** Grants this user permission to edit this category.
 
+---
 
-      /* ==================================================== */
-      /* SECTION 5: TOKEN HUD (Right-Click Overlay)           */
-      /* ==================================================== */
-      
-      #token-hud .attribute input {
-          pointer-events: none !important;
-          background: rgba(0, 0, 0, 0.5) !important;
-      }
-      #token-hud .attribute.bar1, 
-      #token-hud .attribute.bar2 {
-          pointer-events: none !important;
-      }
-    `;
+## 📸 Screenshots
 
-    document.head.appendChild(style);
-    console.log("Global Lockdown: Context Menus Restored (Edit/Delete options hidden).");
-});
+*(Place screenshots of the Lawful Manager UI and a Locked Sheet here)*
+
+---
+
+## 📦 Installation
+
+To install this module within Foundry VTT:
+
+1.  Open the Foundry VTT Setup screen and click on the **Add-on Modules** tab.
+2.  Click **Install Module**.
+3.  In the "Manifest URL" field, paste the following link:
+    ```
+    [https://raw.githubusercontent.com/ogregod/Lawful-Sheets/main/module.json](https://raw.githubusercontent.com/ogregod/Lawful-Sheets/main/module.json)
+    ```
+4.  Click **Install**.
+
+---
+
+## 🛠️ Compatibility
+
+* **System:** Designed primarily for **dnd5e**.
+* **Foundry Version:** Verified for **v11** and **v12**.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
