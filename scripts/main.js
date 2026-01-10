@@ -42,89 +42,209 @@ const LAWS = {
 const MODULE_ID = "lawful-sheets";
 
 /* ==================================================== */
-/* 2. ESTABLISH ORDER (SETTINGS)                        */
+/* 2. THE MANAGER APP (Custom UI)                       */
+/* ==================================================== */
+class LawfulManager extends FormApplication {
+    static get defaultOptions() {
+        return foundry.utils.mergeObject(super.defaultOptions, {
+            id: "lawful-manager",
+            title: "Lawful Sheets: Citizen Management",
+            template: `modules/${MODULE_ID}/templates/manager.html`, // We will simulate this template in render
+            width: 800,
+            height: "auto",
+            closeOnSubmit: true
+        });
+    }
+
+    // This generates the HTML for the menu dynamically
+    render() {
+        const overrides = game.settings.get(MODULE_ID, "userOverrides") || {};
+        const globalSettings = {
+            context: game.settings.get(MODULE_ID, "lockContext"),
+            toggles: game.settings.get(MODULE_ID, "lockToggles"),
+            vitals: game.settings.get(MODULE_ID, "lockVitals"),
+            inventory: game.settings.get(MODULE_ID, "lockInventory"),
+            token: game.settings.get(MODULE_ID, "lockToken"),
+        };
+
+        let rows = "";
+        
+        // Loop through every player user (skip GMs)
+        game.users.filter(u => u.role < 3).forEach(user => {
+            const userSettings = overrides[user.id] || {};
+            
+            const makeSelect = (key) => {
+                const val = userSettings[key] || "default";
+                return `
+                <select name="${user.id}.${key}" style="font-family: monospace;">
+                    <option value="default" ${val === 'default' ? 'selected' : ''}>Default (${globalSettings[key]})</option>
+                    <option value="force-lock" ${val === 'force-lock' ? 'selected' : ''}>🔒 FORCE LOCK</option>
+                    <option value="force-unlock" ${val === 'force-unlock' ? 'selected' : ''}>🔓 FORCE UNLOCK</option>
+                </select>`;
+            };
+
+            rows += `
+            <tr style="border-bottom: 1px solid rgba(0,0,0,0.2);">
+                <td style="padding: 5px; font-weight: bold;">${user.name} <span style="font-size:0.8em; color: #666;">(${user.role === 2 ? 'Trusted' : 'Player'})</span></td>
+                <td>${makeSelect("context")}</td>
+                <td>${makeSelect("toggles")}</td>
+                <td>${makeSelect("vitals")}</td>
+                <td>${makeSelect("inventory")}</td>
+                <td>${makeSelect("token")}</td>
+            </tr>`;
+        });
+
+        const content = `
+        <form style="padding: 10px;">
+            <p style="margin-bottom: 10px;">Configure exceptions here. <b>"Default"</b> uses the Global Rules set in the standard Settings menu.</p>
+            <table style="width: 100%; text-align: left; border-spacing: 0 5px;">
+                <thead>
+                    <tr style="background: rgba(0,0,0,0.1);">
+                        <th style="padding: 5px;">User</th>
+                        <th>Context Menu</th>
+                        <th>Edit Mode</th>
+                        <th>HP/Stats</th>
+                        <th>Inventory</th>
+                        <th>Token HUD</th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+            <footer class="sheet-footer flexrow" style="margin-top: 15px;">
+                <button type="submit" name="submit"><i class="fas fa-save"></i> Save Laws</button>
+            </footer>
+        </form>
+        `;
+
+        // Inject content directly to avoid needing a separate HTML file
+        this._element = $(content);
+        this._element.submit(e => {
+            e.preventDefault();
+            this._onSubmit(e);
+        });
+        
+        // Open the window
+        super.render(true);
+    }
+
+    async _updateObject(event, formData) {
+        // formData comes in as { "userid.context": "val", "userid.toggles": "val" }
+        // We need to nest it back into objects
+        const newOverrides = {};
+        
+        for (let [key, value] of Object.entries(formData)) {
+            const [userId, rule] = key.split(".");
+            if (!newOverrides[userId]) newOverrides[userId] = {};
+            newOverrides[userId][rule] = value;
+        }
+
+        await game.settings.set(MODULE_ID, "userOverrides", newOverrides);
+        ui.notifications.info("Lawful Sheets: Individual exceptions updated.");
+        setTimeout(() => window.location.reload(), 500);
+    }
+}
+
+/* ==================================================== */
+/* 3. SETTINGS REGISTRATION                             */
 /* ==================================================== */
 Hooks.once('init', () => {
-    const registerLaw = (key, name) => {
+    
+    // 1. HIDDEN SETTING: Stores the User Overrides (The Bob vs Sussy logic)
+    game.settings.register(MODULE_ID, "userOverrides", {
+        scope: "world",
+        config: false, // Hidden from standard menu
+        type: Object,
+        default: {}
+    });
+
+    // 2. GLOBAL DEFAULTS (The Role Logic)
+    const registerGlobal = (key, name) => {
         game.settings.register(MODULE_ID, key, {
-            name: name,
-            hint: "Select which rank allows editing.",
+            name: `Global: ${name}`,
+            hint: "Default behavior for Roles. Can be overridden per-user in the Token Controls menu.",
             scope: "world",
             config: true,
             type: String,
             choices: {
-                "none": "Lawless (Unlocked for Everyone)",
-                "player": "Standard Players Locked (Trusted Unlocked)",
-                "all": "Total Lockdown (Players & Trusted Locked)"
+                "none": "Everyone Unlocked",
+                "player": "Players Locked (Trusted Free)",
+                "all": "Everyone Locked"
             },
             default: "player",
             onChange: () => foundry.utils.debounce(() => window.location.reload(), 500)()
         });
     };
 
-    registerLaw("lockContext", "Restrict Context Menus");
-    registerLaw("lockToggles", "Restrict Edit Mode Toggles");
-    registerLaw("lockVitals", "Restrict HP & Stats");
-    registerLaw("lockInventory", "Restrict Inventory Management");
-    registerLaw("lockToken", "Restrict Token HUD");
+    registerGlobal("lockContext", "Context Menus");
+    registerGlobal("lockToggles", "Edit Mode");
+    registerGlobal("lockVitals", "HP & Stats");
+    registerGlobal("lockInventory", "Inventory");
+    registerGlobal("lockToken", "Token HUD");
 });
 
 /* ==================================================== */
-/* 3. ENFORCE THE LAW (LOGIC)                           */
+/* 4. THE ENFORCER (LOGIC)                              */
 /* ==================================================== */
 Hooks.on('ready', () => {
-    // 1. GMs (4) and Assistants (3) are immune
+    // Immunity for GMs
     if (!game.user || game.user.role >= 3) return;
 
+    const overrides = game.settings.get(MODULE_ID, "userOverrides");
+    const myOverrides = overrides[game.user.id] || {};
     const isTrusted = game.user.hasRole("TRUSTED");
+    
     let cssPenalties = "";
 
-    const isGuilty = (key) => {
-        const lawLevel = game.settings.get(MODULE_ID, key);
-        if (lawLevel === "none") return false;
-        if (lawLevel === "all") return true;
-        if (lawLevel === "player" && !isTrusted) return true;
+    // The Logic: 1. Check Override -> 2. Check Global
+    const isGuilty = (ruleKey, globalKey) => {
+        const userRule = myOverrides[ruleKey];
+        
+        // A. Priority: Individual Override
+        if (userRule === "force-lock") return true;
+        if (userRule === "force-unlock") return false;
+
+        // B. Fallback: Global Setting
+        const globalRule = game.settings.get(MODULE_ID, globalKey);
+        if (globalRule === "all") return true;
+        if (globalRule === "player" && !isTrusted) return true;
+        
         return false;
     };
 
-    if (isGuilty("lockContext"))   cssPenalties += LAWS.context;
-    if (isGuilty("lockToggles"))   cssPenalties += LAWS.toggles;
-    if (isGuilty("lockVitals"))    cssPenalties += LAWS.vitals;
-    if (isGuilty("lockInventory")) cssPenalties += LAWS.inventory;
-    if (isGuilty("lockToken"))     cssPenalties += LAWS.token;
+    // Apply strictures
+    if (isGuilty("context", "lockContext"))     cssPenalties += LAWS.context;
+    if (isGuilty("toggles", "lockToggles"))     cssPenalties += LAWS.toggles;
+    if (isGuilty("vitals", "lockVitals"))       cssPenalties += LAWS.vitals;
+    if (isGuilty("inventory", "lockInventory")) cssPenalties += LAWS.inventory;
+    if (isGuilty("token", "lockToken"))         cssPenalties += LAWS.token;
 
     if (cssPenalties) {
         const style = document.createElement('style');
         style.id = "lawful-sheets-enforcement";
         style.innerHTML = cssPenalties;
         document.head.appendChild(style);
-        console.log("Lawful Sheets: Order restored.");
+        console.log("Lawful Sheets: Restrictions applied.");
     }
 });
 
 /* ==================================================== */
-/* 4. THE GAVEL (SIDEBAR BUTTON)                        */
+/* 5. SIDEBAR BUTTON                                    */
 /* ==================================================== */
 Hooks.on('getSceneControlButtons', (controls) => {
-    // Debug log to ensure this code is actually running
-    // If you don't see this in F12 console, the file is cached or not loading
-    console.log("Lawful Sheets: Checking button permissions...");
-
     if (!game.user || game.user.role < 3) return;
 
     const tokenControls = controls.find(c => c.name === "token");
     if (tokenControls) {
         tokenControls.tools.push({
             name: "lawful-config",
-            title: "Lawful Sheets Settings",
-            icon: "fas fa-balance-scale", // Safe icon for all versions
+            title: "Lawful Sheets: User Management",
+            icon: "fas fa-gavel", 
             visible: true,
             onClick: () => {
-                // Opens the standard Settings Config window
-                new SettingsConfig().render(true);
+                // Opens our new custom Manager instead of standard settings
+                new LawfulManager().render(true);
             },
             button: true
         });
-        console.log("Lawful Sheets: Button added to Token Controls.");
     }
 });
