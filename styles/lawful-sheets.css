@@ -1,0 +1,136 @@
+/* ============================================================ */
+/* Lawful Sheets - Manager UI Styles                            */
+/* Static styles for the GM management window only.             */
+/* Enforcement CSS is injected dynamically by enforcer.mjs.     */
+/* ============================================================ */
+
+.lawful-manager .lawful-manager-form {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 8px;
+}
+
+.lawful-manager .lawful-manager-hint {
+    margin-bottom: 12px;
+    font-size: 0.9em;
+    color: #555;
+    line-height: 1.4;
+}
+
+.lawful-manager .lawful-manager-body {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: auto;
+}
+
+/* ---- Table ---- */
+
+.lawful-manager-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82em;
+}
+
+.lawful-manager-table thead tr {
+    background: rgba(0, 0, 0, 0.08);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.lawful-manager-table th {
+    padding: 6px 3px;
+    text-align: center;
+    font-size: 0.85em;
+    white-space: nowrap;
+    border-bottom: 2px solid rgba(0, 0, 0, 0.15);
+}
+
+.lawful-manager-table th.user-col,
+.lawful-manager-table td.user-col {
+    text-align: left;
+    min-width: 130px;
+    padding-left: 6px;
+}
+
+.lawful-manager-table td {
+    padding: 5px 3px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+    text-align: center;
+    vertical-align: middle;
+}
+
+.lawful-manager-table tbody tr:hover {
+    background: rgba(0, 0, 0, 0.03);
+}
+
+/* ---- Selects ---- */
+
+.lawful-manager-table select {
+    font-size: 0.9em;
+    width: 100%;
+    min-width: 70px;
+    padding: 2px 1px;
+    border: 1px solid rgba(0, 0, 0, 0.15);
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.6);
+}
+
+/* ---- Role Badges ---- */
+
+.lawful-manager .user-role {
+    display: inline-block;
+    font-size: 0.75em;
+    padding: 1px 5px;
+    border-radius: 3px;
+    margin-left: 4px;
+    vertical-align: middle;
+}
+
+.lawful-manager .role-player {
+    background: rgba(100, 149, 237, 0.2);
+    color: #4169e1;
+}
+
+.lawful-manager .role-trusted {
+    background: rgba(46, 139, 87, 0.2);
+    color: #2e8b57;
+}
+
+/* ---- Action Column ---- */
+
+.lawful-manager-table th.action-col,
+.lawful-manager-table td.action-col {
+    width: 40px;
+    text-align: center;
+}
+
+.lawful-manager-table td.action-col button {
+    padding: 3px 6px;
+    font-size: 0.85em;
+    cursor: pointer;
+    border: 1px solid rgba(0, 0, 0, 0.15);
+    border-radius: 3px;
+    background: rgba(0, 0, 0, 0.05);
+}
+
+.lawful-manager-table td.action-col button:hover {
+    background: rgba(0, 0, 0, 0.12);
+}
+
+/* ---- Footer ---- */
+
+.lawful-manager .lawful-manager-footer {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(0, 0, 0, 0.1);
+    text-align: right;
+}
+
+.lawful-manager .save-btn {
+    padding: 6px 16px;
+    font-size: 0.95em;
+    font-weight: bold;
+    cursor: pointer;
+}

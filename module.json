@@ -1,16 +1,36 @@
 {
   "id": "lawful-sheets",
   "title": "Lawful Sheets",
-  "version": "1.0.3",
+  "version": "2.0.0",
   "compatibility": {
-    "minimum": "11",
-    "verified": "12"
+    "minimum": 13,
+    "verified": 13,
+    "maximum": 13
   },
-  "scripts": [
-    "scripts/main.js"
+  "authors": [
+    {
+      "name": "ogregod"
+    }
   ],
-  "styles": [],
-  "description": "Enforces strict editing rules for Players while allowing GMs full freedom.",
+  "esmodules": [
+    "scripts/module.mjs"
+  ],
+  "styles": [
+    "styles/lawful-sheets.css"
+  ],
+  "relationships": {
+    "systems": [
+      {
+        "id": "dnd5e",
+        "type": "system",
+        "compatibility": {
+          "minimum": "5.2.0",
+          "verified": "5.2.4"
+        }
+      }
+    ]
+  },
+  "description": "Enforces strict editing rules for Players with backend validation. Prevents cheating on character sheets with CSS enforcement and server-side hook validation.",
   "url": "https://github.com/ogregod/Lawful-Sheets",
   "manifest": "https://raw.githubusercontent.com/ogregod/Lawful-Sheets/main/module.json",
   "download": "https://github.com/ogregod/Lawful-Sheets/archive/refs/heads/main.zip"

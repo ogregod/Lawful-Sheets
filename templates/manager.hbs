@@ -1,0 +1,51 @@
+<form class="lawful-manager-form">
+    <p class="lawful-manager-hint">
+        Configure per-user overrides below. <strong>"Default"</strong> follows the Global setting
+        (configured in Module Settings). <strong>"Lock"</strong> forces the lock regardless of role.
+        <strong>"Unlock"</strong> exempts the user from that lock.
+    </p>
+
+    <div class="lawful-manager-body">
+        <table class="lawful-manager-table">
+            <thead>
+                <tr>
+                    <th class="user-col">User</th>
+                    {{#each categories}}
+                    <th class="category-col" title="Global: {{this.globalLabel}}">{{this.name}}</th>
+                    {{/each}}
+                    <th class="action-col"></th>
+                </tr>
+            </thead>
+            <tbody>
+                {{#each users}}
+                <tr data-user-id="{{this.id}}">
+                    <td class="user-col">
+                        <strong>{{this.name}}</strong>
+                        <span class="user-role {{this.roleClass}}">{{this.role}}</span>
+                    </td>
+                    {{#each this.cells}}
+                    <td class="category-col">
+                        <select name="{{this.name}}">
+                            <option value="default" {{#if this.isDefault}}selected{{/if}}>Default</option>
+                            <option value="force-lock" {{#if this.isLock}}selected{{/if}}>Lock</option>
+                            <option value="force-unlock" {{#if this.isUnlock}}selected{{/if}}>Unlock</option>
+                        </select>
+                    </td>
+                    {{/each}}
+                    <td class="action-col">
+                        <button type="button" data-action="resetUser" data-user-id="{{this.id}}" title="Reset all to default">
+                            <i class="fas fa-undo"></i>
+                        </button>
+                    </td>
+                </tr>
+                {{/each}}
+            </tbody>
+        </table>
+    </div>
+
+    <footer class="lawful-manager-footer">
+        <button type="button" data-action="save" class="save-btn">
+            <i class="fas fa-save"></i> Save Laws
+        </button>
+    </footer>
+</form>
