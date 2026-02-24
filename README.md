@@ -7,9 +7,9 @@
 
 **Let's keep these Player Sheets Lawful.**
 
-Lawful Sheets is a Foundry VTT module that enforces strict data integrity on Character Sheets. It combines **CSS enforcement** (disabling UI elements) with **backend validation** (server-side rejection of unauthorized changes) to prevent players from modifying sensitive data like HP, currency, inventory, ability scores, spell slots, XP, and more.
+Lawful Sheets is a Foundry VTT module that enforces strict data integrity on Character Sheets. It combines **CSS enforcement** (disabling UI elements) with **hook-based validation** (client-side rejection of unauthorized changes) to prevent players from modifying sensitive data like HP, currency, inventory, ability scores, spell slots, XP, and more.
 
-Even if a player opens the browser console and runs `actor.update()` directly, Lawful Sheets blocks the change and notifies the GM.
+If a player opens the browser console and runs `actor.update()` directly, Lawful Sheets will block the change and notify the GM — as long as the module's hooks are active.
 
 Gone are the days of *"oops, I accidentally gave myself 9999 gold"* or *"I thought I had 50 health potions."*
 
@@ -20,7 +20,7 @@ Gone are the days of *"oops, I accidentally gave myself 9999 gold"* or *"I thoug
 Lawful Sheets doesn't just hide things — it enforces the law at the data level. Every locked field is protected by **two layers**:
 
 1. **CSS Enforcement** — Disables, hides, or locks UI elements so players can't interact with them on the sheet.
-2. **Backend Validation** — Hooks into Foundry's `preUpdateActor`, `preUpdateItem`, `preCreateItem`, and `preDeleteItem` to reject unauthorized data changes before they reach the server.
+2. **Hook Validation** — Hooks into Foundry's `preUpdateActor`, `preUpdateItem`, `preCreateItem`, and `preDeleteItem` to reject unauthorized data changes on the client before they are processed.
 
 ### 11 Lock Categories
 
@@ -149,8 +149,8 @@ Lawful Sheets uses a dual-layer enforcement approach:
 **Layer 1 — CSS Injection (UX)**
 On the `ready` hook, the module evaluates which categories are locked for the current user and injects a `<style>` tag that disables relevant UI elements. This prevents casual editing — inputs become non-interactive, buttons are hidden, toggles are disabled. For currency fields specifically, a JavaScript-level input blocker is also applied to catch dynamically rendered elements.
 
-**Layer 2 — Backend Validation (Security)**
-Four Foundry document hooks intercept all data changes before they reach the server:
+**Layer 2 — Hook Validation (Client-Side)**
+Four Foundry document hooks intercept data changes on the client before they are processed:
 
 - `preUpdateActor` — Strips unauthorized field changes from the update object. If a player tries to change their gold AND their name in the same update, the gold change is stripped but the name change goes through.
 - `preUpdateItem` — For items on actors: allows quantity/uses decreases (legitimate usage), blocks increases (cheating). Fully blocks changes to uses.max, equipped, and prepared states.
@@ -170,7 +170,7 @@ lawful-sheets/
 │   ├── module.mjs        — Entry point, hook wiring
 │   ├── settings.mjs      — Settings registration, isLocked() helper
 │   ├── enforcer.mjs      — CSS rules and injection
-│   ├── validator.mjs     — Backend validation hooks
+│   ├── validator.mjs     — Hook validation logic
 │   └── manager.mjs       — GM management UI (ApplicationV2)
 ├── templates/
 │   └── manager.hbs       — Handlebars template for manager window
@@ -183,7 +183,7 @@ lawful-sheets/
 ## FAQ
 
 **Q: Can a tech-savvy player bypass this by opening browser dev tools?**
-A: They can remove the CSS (Layer 1), but they cannot bypass the backend validation (Layer 2). Any `actor.update()` call that tries to increase a protected value will be rejected and the GM will be notified.
+A: They can remove the CSS (Layer 1). The hook validation (Layer 2) stops casual console attempts and provides a meaningful barrier for typical players, but a sufficiently determined user with console access could disable client-side hooks. Lawful Sheets is designed to prevent accidental and casual cheating — not to be a security system against a determined adversary.
 
 **Q: Will this break my shop module?**
 A: Most shop modules (like Item Piles) process transactions through the GM client, which automatically bypasses Lawful Sheets. If a module processes on the player's client, add its module ID to the Module Whitelist setting.
@@ -192,7 +192,7 @@ A: Most shop modules (like Item Piles) process transactions through the GM clien
 A: Yes. Lawful Sheets specifically preserves all rollable buttons, casting buttons, rest buttons, and other interactive gameplay elements. It only locks the data fields themselves.
 
 **Q: Does this work with other character sheet modules?**
-A: The CSS selectors target the default dnd5e 5.2 sheet. Custom sheet modules may use different CSS classes. The backend validation (Layer 2) works regardless of which sheet module is used, since it operates on the data model, not the UI.
+A: The CSS selectors target the default dnd5e 5.2 sheet. Custom sheet modules may use different CSS classes. The hook validation (Layer 2) works regardless of which sheet module is used, since it operates on the data model, not the UI.
 
 **Q: A player used a potion but it didn't get consumed. What's wrong?**
 A: Make sure the Inventory lock category is using the default "Players Locked" setting, not a force-lock override for that user. The subtraction rule allows item consumption (quantity going down). If the issue persists, check that no other modules are interfering with the item's consumption activity.
