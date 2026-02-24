@@ -33,5 +33,5 @@
   "description": "Enforces strict editing rules for Players with backend validation. Prevents cheating on character sheets with CSS enforcement and server-side hook validation.",
   "url": "https://github.com/ogregod/Lawful-Sheets",
   "manifest": "https://raw.githubusercontent.com/ogregod/Lawful-Sheets/main/module.json",
-  "download": "https://github.com/ogregod/Lawful-Sheets/archive/refs/heads/main.zip"
+  "download": "https://github.com/ogregod/Lawful-Sheets/releases/download/v1.0.54/lawful-sheets-v1.0.54.zip"
 }
