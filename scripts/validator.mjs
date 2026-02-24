@@ -45,15 +45,37 @@ const ACTOR_PATH_MAP = [
 ];
 
 /**
- * Paths on embedded items that are protected by the inventory lock.
+ * Paths on embedded items where INCREASES are blocked (cheating),
+ * but DECREASES are allowed (legitimate item usage / consumption).
  */
-const INVENTORY_ITEM_PATHS = [
+const INVENTORY_NUMERIC_PATHS = [
     /^system\.quantity$/,
-    /^system\.uses\./,
-    /^system\.uses$/,
+    /^system\.uses\.value$/
+];
+
+/**
+ * Paths on embedded items that are fully locked (no changes allowed).
+ * These are non-numeric toggles/states that don't follow the add/subtract rule.
+ */
+const INVENTORY_LOCKED_PATHS = [
+    /^system\.uses\.max$/,
     /^system\.equipped$/,
     /^system\.preparation\.prepared$/,
     /^system\.preparation$/
+];
+
+/**
+ * Currency paths on container-type items (bags, backpacks, etc.).
+ * Containers in dnd5e 5.2 can hold their own currency.
+ * INCREASES are blocked (cheating), DECREASES are allowed (spending).
+ */
+const CONTAINER_CURRENCY_PATHS = [
+    /^system\.currency\.cp$/,
+    /^system\.currency\.sp$/,
+    /^system\.currency\.ep$/,
+    /^system\.currency\.gp$/,
+    /^system\.currency\.pp$/,
+    /^system\.currency$/
 ];
 
 /**
@@ -127,8 +149,11 @@ function isWhitelistedSource(options) {
 }
 
 /**
- * Log a blocked cheat attempt by whispering the GM.
- * Only the GM client creates the message to avoid duplicates.
+ * Log a blocked cheat attempt by whispering all active GMs.
+ *
+ * preUpdate hooks only fire on the initiating client, so there is
+ * no risk of duplicate messages. The player's own client creates the
+ * whisper — Foundry allows any user to whisper to GMs.
  *
  * @param {User} user - The user who attempted the change
  * @param {Actor|Item} document - The document being changed
@@ -139,11 +164,11 @@ function isWhitelistedSource(options) {
 function logCheatAttempt(user, document, field, oldValue, newValue) {
     if (!game.settings.get(MODULE_ID, "cheatLogging")) return;
 
-    // Only the GM client should create the whisper to prevent duplicates
-    if (!game.user.isGM) return;
-
     const actorName = document instanceof Actor ? document.name : document.parent?.name ?? "Unknown";
     const gmIds = game.users.filter(u => u.isGM && u.active).map(u => u.id);
+
+    // Don't log if no GMs are online to receive it
+    if (gmIds.length === 0) return;
 
     ChatMessage.create({
         content: `<div style="border-left: 3px solid #ff4444; padding: 5px 10px; background: rgba(255,68,68,0.1); border-radius: 3px;">
@@ -208,7 +233,11 @@ function onPreUpdateActor(actor, changes, options, userId) {
 
 /**
  * Intercepts embedded item updates (items on actors).
- * Checks inventory-locked paths and hit-dice paths on class items.
+ *
+ * KEY RULE: "Subtraction is fine, addition is cheating."
+ * - quantity/uses.value DECREASING = allowed (using items, consuming potions)
+ * - quantity/uses.value INCREASING = blocked (cheating)
+ * - uses.max, equipped, prepared = fully locked (not add/subtract)
  */
 function onPreUpdateItem(item, changes, options, userId) {
     // Only care about items embedded on actors
@@ -224,14 +253,54 @@ function onPreUpdateItem(item, changes, options, userId) {
     for (const [path, newValue] of Object.entries(flat)) {
         if (path === "_id") continue;
 
-        // Check inventory-locked paths
+        // Check inventory locks
         if (isLocked("inventory", userId)) {
-            for (const pattern of INVENTORY_ITEM_PATHS) {
+
+            // NUMERIC PATHS: allow decreases, block increases
+            for (const pattern of INVENTORY_NUMERIC_PATHS) {
+                if (pattern.test(path)) {
+                    const oldValue = foundry.utils.getProperty(item, path);
+                    const oldNum = Number(oldValue) || 0;
+                    const newNum = Number(newValue) || 0;
+
+                    if (newNum > oldNum) {
+                        // INCREASE = cheating, block it
+                        logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
+                        deletePath(changes, path);
+                        blocked = true;
+                    }
+                    // DECREASE or same = legitimate usage, allow it
+                    break;
+                }
+            }
+
+            // FULLY LOCKED PATHS: block all changes
+            for (const pattern of INVENTORY_LOCKED_PATHS) {
                 if (pattern.test(path)) {
                     const oldValue = foundry.utils.getProperty(item, path);
                     logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
                     deletePath(changes, path);
                     blocked = true;
+                    break;
+                }
+            }
+        }
+
+        // Check currency on container items (bags, backpacks, etc.)
+        if (item.type === "container" && isLocked("currency", userId)) {
+            for (const pattern of CONTAINER_CURRENCY_PATHS) {
+                if (pattern.test(path)) {
+                    const oldValue = foundry.utils.getProperty(item, path);
+                    const oldNum = Number(oldValue) || 0;
+                    const newNum = Number(newValue) || 0;
+
+                    if (newNum > oldNum) {
+                        // INCREASE = cheating, block it
+                        logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
+                        deletePath(changes, path);
+                        blocked = true;
+                    }
+                    // DECREASE = spending, allow it
                     break;
                 }
             }
@@ -285,7 +354,15 @@ function onPreCreateItem(item, data, options, userId) {
 /* ============================================================ */
 
 /**
- * Blocks item deletion on actors when inventory is locked.
+ * Handles item deletion on actors when inventory is locked.
+ *
+ * Deletion IS allowed when:
+ * - The item's quantity is 0 or 1 (consumed the last one — this is subtraction)
+ * - The item has uses and they're depleted (used the last charge)
+ *
+ * Deletion is BLOCKED when:
+ * - The item has quantity > 1 and a player tries to delete the whole stack
+ *   (this could be trying to hide evidence or grief-delete items)
  */
 function onPreDeleteItem(item, options, userId) {
     if (!item.parent || !(item.parent instanceof Actor)) return;
@@ -295,7 +372,17 @@ function onPreDeleteItem(item, options, userId) {
     if (isWhitelistedSource(options)) return;
 
     if (isLocked("inventory", userId)) {
-        logCheatAttempt(user, item.parent, `Delete item: ${item.name}`, item.name, "deleted");
+        const quantity = item.system?.quantity ?? 0;
+        const usesValue = item.system?.uses?.value ?? null;
+
+        // Allow deletion if quantity is 0 or 1 (last item consumed)
+        if (quantity <= 1) return;
+
+        // Allow deletion if uses are depleted (last charge used)
+        if (usesValue !== null && usesValue <= 0) return;
+
+        // Block bulk deletion (player deleting a stack of items)
+        logCheatAttempt(user, item.parent, `Delete item: ${item.name} (qty: ${quantity})`, item.name, "deleted");
         return false;
     }
 }

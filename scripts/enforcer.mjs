@@ -86,26 +86,59 @@ const CSS_RULES = {
     `,
 
     currency: `
-        /* Lock all currency inputs */
+        /* Lock all currency inputs — actor sheets */
         .sheet.actor input[name="system.currency.cp"],
         .sheet.actor input[name="system.currency.sp"],
         .sheet.actor input[name="system.currency.ep"],
         .sheet.actor input[name="system.currency.gp"],
         .sheet.actor input[name="system.currency.pp"],
         .sheet.actor .currency input,
-        .sheet.actor [data-group="currency"] input {
+        .sheet.actor [data-group="currency"] input,
+        .sheet.actor [class*="currency"] input,
+        .sheet.actor [data-field^="system.currency"] input,
+        .sheet.actor [data-field^="system.currency"],
+        .sheet.actor .inventory-element .currency input,
+        /* Lock currency inputs inside container/item sheets (bags, backpacks) */
+        .sheet.item input[name="system.currency.cp"],
+        .sheet.item input[name="system.currency.sp"],
+        .sheet.item input[name="system.currency.ep"],
+        .sheet.item input[name="system.currency.gp"],
+        .sheet.item input[name="system.currency.pp"],
+        .sheet.item .currency input,
+        .sheet.item [data-group="currency"] input,
+        .sheet.item [class*="currency"] input,
+        .sheet.item [data-field^="system.currency"] input,
+        .sheet.item [data-field^="system.currency"],
+        /* Also catch any container sheet variant */
+        .container-sheet .currency input,
+        .container-sheet [class*="currency"] input,
+        .container-sheet input[name^="system.currency."] {
             pointer-events: none !important;
             background: transparent !important;
             border: none !important;
             cursor: default !important;
+            user-select: none !important;
+            -webkit-user-select: none !important;
+            opacity: 1 !important;
+            color: inherit !important;
         }
-        /* Hide currency adjustment buttons */
+        /* Hide currency adjustment buttons — actor sheets */
         .sheet.actor .currency .adjustment-button,
         .sheet.actor .currency button[data-action="increment"],
         .sheet.actor .currency button[data-action="decrement"],
         .sheet.actor [data-group="currency"] .adjustment-button,
         .sheet.actor [data-group="currency"] button[data-action="increment"],
-        .sheet.actor [data-group="currency"] button[data-action="decrement"] {
+        .sheet.actor [data-group="currency"] button[data-action="decrement"],
+        .sheet.actor [class*="currency"] .adjustment-button,
+        .sheet.actor [class*="currency"] button,
+        /* Hide currency adjustment buttons — container/item sheets */
+        .sheet.item .currency .adjustment-button,
+        .sheet.item .currency button[data-action="increment"],
+        .sheet.item .currency button[data-action="decrement"],
+        .sheet.item [class*="currency"] .adjustment-button,
+        .sheet.item [class*="currency"] button,
+        .container-sheet .currency .adjustment-button,
+        .container-sheet .currency button {
             display: none !important;
         }
     `,
@@ -253,6 +286,19 @@ export function applyEnforcement() {
         console.log("Lawful Sheets | CSS enforcement applied.");
     }
 
+    // Currency: JS-level input blocker (CSS alone may not catch dynamic dnd5e inputs)
+    if (isLocked("currency", userId)) {
+        lockCurrencyInputs();
+        // Re-lock whenever any sheet re-renders (actor sheets AND item/container sheets)
+        Hooks.on("renderActorSheet", (_app, html) => {
+            lockCurrencyInputs(html);
+        });
+        Hooks.on("renderItemSheet", (_app, html) => {
+            lockCurrencyInputs(html);
+        });
+        console.log("Lawful Sheets | Currency input blocker applied.");
+    }
+
     // Refund button removal via chat message hook
     if (isLocked("refundButton", userId)) {
         Hooks.on("renderChatMessage", (_message, html) => {
@@ -264,6 +310,42 @@ export function applyEnforcement() {
         });
         console.log("Lawful Sheets | Refund button enforcement applied.");
     }
+}
+
+/**
+ * Lock currency input fields at the DOM level.
+ * Finds all currency-related inputs and makes them truly readonly
+ * by setting the readonly attribute and blocking focus/input events.
+ *
+ * @param {HTMLElement} [scope=document] - The DOM scope to search within
+ */
+function lockCurrencyInputs(scope) {
+    const root = scope instanceof HTMLElement ? scope : scope?.[0] ?? document;
+
+    // All possible selectors for currency inputs in dnd5e 5.2
+    const selectors = [
+        'input[name="system.currency.cp"]',
+        'input[name="system.currency.sp"]',
+        'input[name="system.currency.ep"]',
+        'input[name="system.currency.gp"]',
+        'input[name="system.currency.pp"]',
+        '.currency input[type="text"]',
+        '.currency input[type="number"]',
+        '[data-field^="system.currency"] input',
+        '[class*="currency"] input'
+    ];
+
+    const inputs = root.querySelectorAll(selectors.join(", "));
+    inputs.forEach(input => {
+        input.setAttribute("readonly", "");
+        input.setAttribute("tabindex", "-1");
+        input.style.pointerEvents = "none";
+        input.style.cursor = "default";
+        // Block focus, click, and input events
+        input.addEventListener("focus", (e) => { e.target.blur(); }, { capture: true });
+        input.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); }, { capture: true });
+        input.addEventListener("input", (e) => { e.preventDefault(); e.stopPropagation(); }, { capture: true });
+    });
 }
 
 /**

@@ -1,5 +1,5 @@
 /**
- * Lawful Sheets v2.0
+ * Lawful Sheets v1.0.54
  * Enforces strict editing rules for Players with backend validation.
  * CSS enforcement provides the UX layer; preUpdate hooks provide real security.
  *
@@ -38,7 +38,7 @@ Hooks.once("ready", () => {
         applyEnforcement();
     }
 
-    console.log(`Lawful Sheets v2.0 | Ready. User: ${game.user.name} (Role ${game.user.role})`);
+    console.log(`Lawful Sheets v1.0.54 | Ready. User: ${game.user.name} (Role ${game.user.role})`);
 });
 
 /* ============================================================ */
