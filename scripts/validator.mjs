@@ -61,6 +61,17 @@ const INVENTORY_NUMERIC_PATHS = [
 ];
 
 /**
+ * Paths on embedded items where DECREASES are blocked (cheating by reducing "spent" = gaining resources),
+ * but INCREASES are allowed (legitimate usage consumption).
+ * dnd5e v4 derives uses.value as (max - spent), so blocking spent decreases is equivalent
+ * to blocking uses.value increases when both are sent in the same update payload.
+ * Routed through the "quantity" subcategory.
+ */
+const INVENTORY_INVERSE_NUMERIC_PATHS = [
+    /^system\.uses\.spent$/
+];
+
+/**
  * Paths on embedded items that are fully locked under a specific subcategory.
  * system.equipped → "equip" subcategory
  * system.preparation.* → "prepared" subcategory
@@ -365,6 +376,37 @@ function onPreUpdateItem(item, changes, options, userId) {
                     }
                 }
                 // Decrease or same = legitimate usage, always allow
+            }
+            if (!pathBlocked) allowedFlat[path] = newValue;
+            else anyBlocked = true;
+            continue;
+        }
+
+        // INVERSE NUMERIC PATHS (uses.spent): "quantity" subcategory, inverted subtraction rule.
+        // In dnd5e v4, uses.value is derived as (max - spent). A player who reduces spent is
+        // effectively gaining resources — the cheating direction. Block decreases, allow increases.
+        const inverseNumericMatch = INVENTORY_INVERSE_NUMERIC_PATHS.some(p => p.test(path));
+        if (inverseNumericMatch) {
+            const level = getLockLevel("inventory", userId, "quantity");
+            if (level !== "none") {
+                const oldNum = Number(foundry.utils.getProperty(item, path)) || 0;
+                const newNum = Number(newValue) || 0;
+                if (newNum < oldNum) {
+                    const oldValue = foundry.utils.getProperty(item, path);
+                    if (level === "locked") {
+                        logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
+                        pathBlocked = true;
+                    } else if (level === "request") {
+                        sendApprovalRequest(user, item.parent, `recover uses via ${path} on ${item.name}`, {
+                            type: "updateItem",
+                            actorId: item.parent.id,
+                            itemId: item.id,
+                            changes: { [path]: newValue }
+                        });
+                        pathBlocked = true;
+                    }
+                }
+                // Increase or same = legitimate usage (spending), always allow
             }
             if (!pathBlocked) allowedFlat[path] = newValue;
             else anyBlocked = true;
