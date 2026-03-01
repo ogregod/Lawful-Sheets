@@ -2,7 +2,7 @@
 
 ![Foundry Version](https://img.shields.io/badge/Foundry-v13-orange)
 ![dnd5e](https://img.shields.io/badge/dnd5e-5.2.x-red)
-![Version](https://img.shields.io/badge/Version-1.0.54-blue)
+![Version](https://img.shields.io/badge/Version-1.0.55-blue)
 [![Latest Release](https://img.shields.io/github/v/release/ogregod/Lawful-Sheets?display_name=tag)](https://github.com/ogregod/Lawful-Sheets/releases/latest)
 
 **Let's keep these Player Sheets Lawful.**

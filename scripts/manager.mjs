@@ -4,16 +4,48 @@
  * Accessed via the gavel button on the Token Controls toolbar.
  */
 
-import { LOCK_CATEGORIES } from "./settings.mjs";
+import { LOCK_CATEGORIES, INVENTORY_SUBCATEGORIES } from "./settings.mjs";
 
 const MODULE_ID = "lawful-sheets";
 
 const { ApplicationV2, HandlebarsApplicationMixin } = foundry.applications.api;
 
+/** Override value choices shown in each dropdown */
+const OVERRIDE_CHOICES = [
+    { value: "default",       label: "Default" },
+    { value: "force-lock",    label: "Lock" },
+    { value: "force-unlock",  label: "Unlock" },
+    { value: "force-request", label: "Request" }
+];
+
+/** Human-readable labels for global setting values */
+const GLOBAL_LABELS = {
+    "none":    "Unlocked",
+    "player":  "Players Locked",
+    "all":     "All Locked",
+    "request": "Request Approval"
+};
+
+/**
+ * Build a single cell descriptor for a given user and override key.
+ */
+function buildCell(userId, key, currentValue, globalLabel) {
+    const value = currentValue || "default";
+    return {
+        name: `${userId}.${key}`,
+        value,
+        globalLabel,
+        choices: OVERRIDE_CHOICES.map(c => ({
+            ...c,
+            selected: c.value === value
+        }))
+    };
+}
+
 /**
  * The Lawful Sheets Citizen Management window.
  * Displays all non-GM users and lets the GM set per-user overrides
- * for each of the 11 lock categories.
+ * for each lock category and inventory subcategory.
  */
 export class LawfulManager extends HandlebarsApplicationMixin(ApplicationV2) {
 
@@ -31,8 +63,8 @@ export class LawfulManager extends HandlebarsApplicationMixin(ApplicationV2) {
             resizable: true
         },
         position: {
-            width: 950,
-            height: 620
+            width: 1050,
+            height: 640
         },
         actions: {
             save: LawfulManager.#onSave,
@@ -53,34 +85,51 @@ export class LawfulManager extends HandlebarsApplicationMixin(ApplicationV2) {
         const context = await super._prepareContext(options);
         const overrides = game.settings.get(MODULE_ID, "userOverrides") || {};
 
-        // Build category headers with current global setting labels
-        const globalLabels = { "none": "Unlocked", "player": "Players Locked", "all": "All Locked" };
+        // Build category headers
         context.categories = Object.entries(LOCK_CATEGORIES).map(([id, cat]) => {
             const globalValue = game.settings.get(MODULE_ID, cat.key);
-            return {
+            const entry = {
                 id,
                 name: cat.name,
-                globalValue,
-                globalLabel: globalLabels[globalValue] || globalValue
+                globalLabel: GLOBAL_LABELS[globalValue] || globalValue,
+                hasSubcategories: !!cat.subcategories
             };
+
+            if (cat.subcategories) {
+                entry.subcategories = Object.entries(cat.subcategories).map(([subId, sub]) => {
+                    const subGlobal = game.settings.get(MODULE_ID, sub.key);
+                    return {
+                        id: `${id}.${subId}`,
+                        name: sub.name,
+                        globalLabel: subGlobal === "inherit"
+                            ? `Inherit (${GLOBAL_LABELS[game.settings.get(MODULE_ID, cat.key)] ?? "?"})`
+                            : (GLOBAL_LABELS[subGlobal] || subGlobal)
+                    };
+                });
+            }
+
+            return entry;
         });
 
-        // Build user rows with pre-computed selected states for each category
+        // Build flat column list (parent categories + subcategories interleaved)
+        context.columns = [];
+        for (const cat of context.categories) {
+            context.columns.push({ ...cat, isSub: false });
+            if (cat.subcategories) {
+                for (const sub of cat.subcategories) {
+                    context.columns.push({ ...sub, isSub: true });
+                }
+            }
+        }
+
+        // Build user rows
         context.users = game.users
             .filter(u => u.role < 3)
             .sort((a, b) => a.name.localeCompare(b.name))
             .map(u => {
                 const userOverrides = overrides[u.id] || {};
-                const cells = context.categories.map(cat => {
-                    const value = userOverrides[cat.id] || "default";
-                    return {
-                        name: `${u.id}.${cat.id}`,
-                        value,
-                        globalLabel: cat.globalLabel,
-                        isDefault: value === "default",
-                        isLock: value === "force-lock",
-                        isUnlock: value === "force-unlock"
-                    };
+                const cells = context.columns.map(col => {
+                    return buildCell(u.id, col.id, userOverrides[col.id], col.globalLabel);
                 });
                 return {
                     id: u.id,
@@ -96,7 +145,6 @@ export class LawfulManager extends HandlebarsApplicationMixin(ApplicationV2) {
 
     /**
      * Handle the Save button click.
-     * Parses form data into the userOverrides structure and saves it.
      */
     static async #onSave(event, target) {
         const form = this.element.querySelector("form");
@@ -109,9 +157,9 @@ export class LawfulManager extends HandlebarsApplicationMixin(ApplicationV2) {
             const dotIndex = key.indexOf(".");
             if (dotIndex === -1) continue;
             const userId = key.substring(0, dotIndex);
-            const categoryId = key.substring(dotIndex + 1);
+            const categoryKey = key.substring(dotIndex + 1);
             if (!newOverrides[userId]) newOverrides[userId] = {};
-            newOverrides[userId][categoryId] = value;
+            newOverrides[userId][categoryKey] = value;
         }
 
         await game.settings.set(MODULE_ID, "userOverrides", newOverrides);
@@ -122,7 +170,6 @@ export class LawfulManager extends HandlebarsApplicationMixin(ApplicationV2) {
 
     /**
      * Handle the Reset button for a single user.
-     * Sets all dropdowns for that user back to "default".
      */
     static async #onResetUser(event, target) {
         const userId = target.dataset.userId;

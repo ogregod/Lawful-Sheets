@@ -98,6 +98,25 @@
     color: #2e8b57;
 }
 
+/* ---- Subcategory Columns ---- */
+
+.lawful-manager-table th.sub-col,
+.lawful-manager-table td.sub-col {
+    background: rgba(0, 0, 0, 0.03);
+    border-left: 1px dashed rgba(0, 0, 0, 0.1);
+}
+
+.lawful-manager-table th.sub-col {
+    font-style: italic;
+    font-size: 0.8em;
+    color: #555;
+}
+
+.sub-indent {
+    margin-right: 2px;
+    color: #999;
+}
+
 /* ---- Action Column ---- */
 
 .lawful-manager-table th.action-col,

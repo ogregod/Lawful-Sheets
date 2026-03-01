@@ -1,12 +1,10 @@
 /**
- * Lawful Sheets - Backend Validator
+ * Lawful Sheets - Validator
  * Hooks into preUpdateActor, preUpdateItem, preCreateItem, and preDeleteItem
- * to reject unauthorized data changes server-side.
- *
- * This is the REAL security layer. CSS enforcement (enforcer.mjs) is just UX.
+ * to reject or escalate unauthorized data changes on the client.
  */
 
-import { isLocked } from "./settings.mjs";
+import { isLocked, isRequest, getLockLevel } from "./settings.mjs";
 
 const MODULE_ID = "lawful-sheets";
 
@@ -45,8 +43,17 @@ const ACTOR_PATH_MAP = [
 ];
 
 /**
+ * Spell slot / spell point VALUE paths where decreases are allowed (consumption).
+ * Increases are still blocked when spellSlots is locked.
+ */
+const SPELL_NUMERIC_PATHS = [
+    /^system\.spells\.\w+\.value$/   // e.g. spell1.value, spell2.value, points.value
+];
+
+/**
  * Paths on embedded items where INCREASES are blocked (cheating),
  * but DECREASES are allowed (legitimate item usage / consumption).
+ * Routed through the "quantity" subcategory.
  */
 const INVENTORY_NUMERIC_PATHS = [
     /^system\.quantity$/,
@@ -54,19 +61,20 @@ const INVENTORY_NUMERIC_PATHS = [
 ];
 
 /**
- * Paths on embedded items that are fully locked (no changes allowed).
- * These are non-numeric toggles/states that don't follow the add/subtract rule.
+ * Paths on embedded items that are fully locked under a specific subcategory.
+ * system.equipped → "equip" subcategory
+ * system.preparation.* → "prepared" subcategory
+ * system.uses.max → "quantity" subcategory (no subtraction logic applies)
  */
-const INVENTORY_LOCKED_PATHS = [
-    /^system\.uses\.max$/,
-    /^system\.equipped$/,
-    /^system\.preparation\.prepared$/,
-    /^system\.preparation$/
+const INVENTORY_SUBCATEGORY_PATHS = [
+    { pattern: /^system\.equipped$/,              subId: "equip" },
+    { pattern: /^system\.preparation\.prepared$/, subId: "prepared" },
+    { pattern: /^system\.preparation$/,           subId: "prepared" },
+    { pattern: /^system\.uses\.max$/,             subId: "quantity" }
 ];
 
 /**
  * Currency paths on container-type items (bags, backpacks, etc.).
- * Containers in dnd5e 5.2 can hold their own currency.
  * INCREASES are blocked (cheating), DECREASES are allowed (spending).
  */
 const CONTAINER_CURRENCY_PATHS = [
@@ -87,15 +95,23 @@ const HIT_DICE_ITEM_PATHS = [
 ];
 
 /* ============================================================ */
+/* PENDING APPROVAL REQUESTS                                    */
+/* ============================================================ */
+
+/**
+ * In-memory store for pending approval requests on this client.
+ * Keyed by requestId. Primarily used for reference; the authoritative
+ * data for cross-client approval is stored in the chat message flags.
+ */
+export const pendingRequests = new Map();
+
+/* ============================================================ */
 /* UTILITY FUNCTIONS                                            */
 /* ============================================================ */
 
 /**
  * Delete a dot-notation path from a nested object.
  * Cleans up empty parent containers afterward.
- *
- * @param {Object} obj - The object to modify
- * @param {string} path - Dot-notation path (e.g. "system.currency.gp")
  */
 function deletePath(obj, path) {
     const parts = path.split(".");
@@ -108,7 +124,6 @@ function deletePath(obj, path) {
 
     delete current?.[parts[parts.length - 1]];
 
-    // Clean up empty parent objects (walk backwards)
     for (let i = parts.length - 2; i >= 0; i--) {
         let parent = obj;
         for (let j = 0; j < i; j++) parent = parent[parts[j]];
@@ -122,27 +137,30 @@ function deletePath(obj, path) {
 }
 
 /**
- * Check if the update comes from a whitelisted module.
+ * Check if the update comes from a whitelisted module or an approved action.
  * @param {Object} options - The update options object
  * @returns {boolean}
  */
 function isWhitelistedSource(options) {
+    // GM-approved action (from our own approval flow)
+    if (options.lawfulApproved) return true;
+
     const raw = game.settings.get(MODULE_ID, "moduleWhitelist");
     const whitelist = raw.split(",").map(s => s.trim()).filter(Boolean);
 
     for (const moduleId of whitelist) {
-        // Modules often pass their ID as a truthy key in options
         if (options[moduleId]) return true;
-        // Or nested under flags
         if (options?.flags?.[moduleId]) return true;
     }
 
-    // dnd5e internal operations (rests, damage application, healing, etc.)
-    if (options.isRest) return true;
-    if (options.isDamage) return true;
-    if (options.isHealing) return true;
+    // Item Piles variants
+    if (options.itemPiles)     return true;
+    if (options.fromItemPiles) return true;
 
-    // dnd5e activity-based updates (using items, casting spells)
+    // dnd5e internal operations
+    if (options.isRest)     return true;
+    if (options.isDamage)   return true;
+    if (options.isHealing)  return true;
     if (options.isActivity) return true;
 
     return false;
@@ -150,24 +168,12 @@ function isWhitelistedSource(options) {
 
 /**
  * Log a blocked cheat attempt by whispering all active GMs.
- *
- * preUpdate hooks only fire on the initiating client, so there is
- * no risk of duplicate messages. The player's own client creates the
- * whisper — Foundry allows any user to whisper to GMs.
- *
- * @param {User} user - The user who attempted the change
- * @param {Actor|Item} document - The document being changed
- * @param {string} field - The data path that was blocked
- * @param {*} oldValue - The original value
- * @param {*} newValue - The attempted new value
  */
 function logCheatAttempt(user, document, field, oldValue, newValue) {
     if (!game.settings.get(MODULE_ID, "cheatLogging")) return;
 
     const actorName = document instanceof Actor ? document.name : document.parent?.name ?? "Unknown";
     const gmIds = game.users.filter(u => u.isGM && u.active).map(u => u.id);
-
-    // Don't log if no GMs are online to receive it
     if (gmIds.length === 0) return;
 
     ChatMessage.create({
@@ -181,49 +187,117 @@ function logCheatAttempt(user, document, field, oldValue, newValue) {
     });
 }
 
+/**
+ * Send a GM approval request as a whispered chat card with Approve/Deny buttons.
+ * The full request data is embedded in the chat message flags so the GM can
+ * approve from any client without needing local state.
+ *
+ * @param {User} user - The player making the request
+ * @param {Actor|null} actor - The actor being modified
+ * @param {string} label - Human-readable description of the action
+ * @param {Object} requestData - Data needed to replay the action on approval
+ */
+function sendApprovalRequest(user, actor, label, requestData) {
+    const requestId = foundry.utils.randomID();
+    pendingRequests.set(requestId, requestData);
+
+    const gmIds = game.users.filter(u => u.isGM && u.active).map(u => u.id);
+    if (gmIds.length === 0) return; // No GM online — silently blocked
+
+    const actorName = actor?.name ?? "Unknown";
+
+    ChatMessage.create({
+        flags: {
+            [MODULE_ID]: {
+                approvalRequest: true,
+                requestId,
+                requestData
+            }
+        },
+        content: `<div style="border-left: 3px solid #f0a500; padding: 5px 10px; background: rgba(240,165,0,0.1); border-radius: 3px;">
+            <strong style="color: #f0a500;">&#9889; Lawful Sheets &mdash; Approval Request</strong><br>
+            <b>${user.name}</b> wants to <b>${label}</b> on <b>${actorName}</b><br>
+            <div style="margin-top: 6px; display: flex; gap: 6px;">
+                <button data-action="lawful-approve" data-request-id="${requestId}"
+                    style="background:#4caf50;color:#fff;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;">
+                    Approve
+                </button>
+                <button data-action="lawful-deny" data-request-id="${requestId}"
+                    style="background:#f44336;color:#fff;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;">
+                    Deny
+                </button>
+            </div>
+        </div>`,
+        whisper: gmIds,
+        speaker: { alias: "Lawful Sheets" }
+    });
+}
+
 /* ============================================================ */
 /* PRE-UPDATE ACTOR HOOK                                        */
 /* ============================================================ */
 
-/**
- * Intercepts actor updates. Flattens the changes object, checks each
- * path against the category map, and strips unauthorized fields.
- * If ALL meaningful fields are stripped, blocks the entire update.
- */
 function onPreUpdateActor(actor, changes, options, userId) {
     const user = game.users.get(userId);
     if (!user) return;
-
-    // GMs always pass
     if (user.role >= 3) return;
-
-    // Whitelisted module operations pass
     if (isWhitelistedSource(options)) return;
 
     const flat = foundry.utils.flattenObject(changes);
     let blocked = false;
+    const approvalGroups = new Map(); // category → { changes, label }
 
     for (const [path, newValue] of Object.entries(flat)) {
         if (path === "_id") continue;
 
         for (const mapping of ACTOR_PATH_MAP) {
-            if (mapping.pattern.test(path) && isLocked(mapping.category, userId)) {
-                const oldValue = foundry.utils.getProperty(actor, path);
+            if (!mapping.pattern.test(path)) continue;
+
+            const level = getLockLevel(mapping.category, userId);
+            if (level === "none") break;
+
+            // Special case: spell slot / spell point VALUE paths use subtraction rule
+            if (mapping.category === "spellSlots") {
+                const isNumericSpellPath = SPELL_NUMERIC_PATHS.some(p => p.test(path));
+                if (isNumericSpellPath) {
+                    const oldNum = Number(foundry.utils.getProperty(actor, path)) || 0;
+                    const newNum = Number(newValue) || 0;
+                    if (newNum <= oldNum) break; // Decrease = consumption, allow it
+                }
+            }
+
+            const oldValue = foundry.utils.getProperty(actor, path);
+
+            if (level === "locked") {
                 logCheatAttempt(user, actor, path, oldValue, newValue);
                 deletePath(changes, path);
                 blocked = true;
-                break;
+            } else if (level === "request") {
+                // Gather all approval-needed changes by category
+                if (!approvalGroups.has(mapping.category)) {
+                    approvalGroups.set(mapping.category, { changes: {}, label: mapping.category });
+                }
+                approvalGroups.get(mapping.category).changes[path] = newValue;
+                deletePath(changes, path);
+                blocked = true;
             }
+            break;
         }
     }
 
-    // If we stripped everything meaningful, cancel the entire update
+    // Send one approval request per category group
+    for (const [, group] of approvalGroups) {
+        sendApprovalRequest(user, actor, `modify ${group.label}`, {
+            type: "actor",
+            actorId: actor.id,
+            changes: group.changes
+        });
+    }
+
     if (blocked) {
         const remaining = foundry.utils.flattenObject(changes);
         const meaningfulKeys = Object.keys(remaining).filter(k => k !== "_id");
-        if (meaningfulKeys.length === 0) {
-            return false;
-        }
+        if (meaningfulKeys.length === 0) return false;
     }
 }
 
@@ -231,16 +305,7 @@ function onPreUpdateActor(actor, changes, options, userId) {
 /* PRE-UPDATE ITEM HOOK                                         */
 /* ============================================================ */
 
-/**
- * Intercepts embedded item updates (items on actors).
- *
- * KEY RULE: "Subtraction is fine, addition is cheating."
- * - quantity/uses.value DECREASING = allowed (using items, consuming potions)
- * - quantity/uses.value INCREASING = blocked (cheating)
- * - uses.max, equipped, prepared = fully locked (not add/subtract)
- */
 function onPreUpdateItem(item, changes, options, userId) {
-    // Only care about items embedded on actors
     if (!item.parent || !(item.parent instanceof Actor)) return;
 
     const user = game.users.get(userId);
@@ -253,65 +318,86 @@ function onPreUpdateItem(item, changes, options, userId) {
     for (const [path, newValue] of Object.entries(flat)) {
         if (path === "_id") continue;
 
-        // Check inventory locks
-        if (isLocked("inventory", userId)) {
+        // --- Inventory subcategory path checks ---
 
-            // NUMERIC PATHS: allow decreases, block increases
-            for (const pattern of INVENTORY_NUMERIC_PATHS) {
-                if (pattern.test(path)) {
+        // NUMERIC PATHS (quantity, uses.value): routed through "quantity" subcategory
+        const numericMatch = INVENTORY_NUMERIC_PATHS.some(p => p.test(path));
+        if (numericMatch) {
+            const level = getLockLevel("inventory", userId, "quantity");
+            if (level !== "none") {
+                const oldNum = Number(foundry.utils.getProperty(item, path)) || 0;
+                const newNum = Number(newValue) || 0;
+                if (newNum > oldNum) {
+                    // Increase = potentially cheating
                     const oldValue = foundry.utils.getProperty(item, path);
-                    const oldNum = Number(oldValue) || 0;
-                    const newNum = Number(newValue) || 0;
-
-                    if (newNum > oldNum) {
-                        // INCREASE = cheating, block it
+                    if (level === "locked") {
                         logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
                         deletePath(changes, path);
                         blocked = true;
+                    } else if (level === "request") {
+                        sendApprovalRequest(user, item.parent, `increase ${path} on ${item.name}`, {
+                            type: "updateItem",
+                            actorId: item.parent.id,
+                            itemId: item.id,
+                            changes: { [path]: newValue }
+                        });
+                        deletePath(changes, path);
+                        blocked = true;
                     }
-                    // DECREASE or same = legitimate usage, allow it
-                    break;
                 }
+                // Decrease = legitimate usage, always allow
             }
+            continue;
+        }
 
-            // FULLY LOCKED PATHS: block all changes
-            for (const pattern of INVENTORY_LOCKED_PATHS) {
-                if (pattern.test(path)) {
-                    const oldValue = foundry.utils.getProperty(item, path);
+        // SUBCATEGORY PATHS (equip, prepared, uses.max)
+        const subMatch = INVENTORY_SUBCATEGORY_PATHS.find(e => e.pattern.test(path));
+        if (subMatch) {
+            const level = getLockLevel("inventory", userId, subMatch.subId);
+            if (level !== "none") {
+                const oldValue = foundry.utils.getProperty(item, path);
+                if (level === "locked") {
                     logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
                     deletePath(changes, path);
                     blocked = true;
-                    break;
+                } else if (level === "request") {
+                    const labels = { equip: "equip/unequip", prepared: "change prepared state", quantity: "modify uses" };
+                    sendApprovalRequest(user, item.parent, `${labels[subMatch.subId] ?? path} on ${item.name}`, {
+                        type: "updateItem",
+                        actorId: item.parent.id,
+                        itemId: item.id,
+                        changes: { [path]: newValue }
+                    });
+                    deletePath(changes, path);
+                    blocked = true;
                 }
             }
+            continue;
         }
 
-        // Check currency on container items (bags, backpacks, etc.)
+        // Currency on container-type items
         if (item.type === "container" && isLocked("currency", userId)) {
             for (const pattern of CONTAINER_CURRENCY_PATHS) {
                 if (pattern.test(path)) {
-                    const oldValue = foundry.utils.getProperty(item, path);
-                    const oldNum = Number(oldValue) || 0;
+                    const oldNum = Number(foundry.utils.getProperty(item, path)) || 0;
                     const newNum = Number(newValue) || 0;
-
                     if (newNum > oldNum) {
-                        // INCREASE = cheating, block it
-                        logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
+                        logCheatAttempt(user, item, `${item.name} > ${path}`,
+                            foundry.utils.getProperty(item, path), newValue);
                         deletePath(changes, path);
                         blocked = true;
                     }
-                    // DECREASE = spending, allow it
                     break;
                 }
             }
         }
 
-        // Check hit dice paths on class-type items (protected by HP lock)
+        // Hit dice paths on class-type items (HP lock)
         if (item.type === "class" && isLocked("hp", userId)) {
             for (const pattern of HIT_DICE_ITEM_PATHS) {
                 if (pattern.test(path)) {
-                    const oldValue = foundry.utils.getProperty(item, path);
-                    logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
+                    logCheatAttempt(user, item, `${item.name} > ${path}`,
+                        foundry.utils.getProperty(item, path), newValue);
                     deletePath(changes, path);
                     blocked = true;
                     break;
@@ -323,9 +409,7 @@ function onPreUpdateItem(item, changes, options, userId) {
     if (blocked) {
         const remaining = foundry.utils.flattenObject(changes);
         const meaningfulKeys = Object.keys(remaining).filter(k => k !== "_id");
-        if (meaningfulKeys.length === 0) {
-            return false;
-        }
+        if (meaningfulKeys.length === 0) return false;
     }
 }
 
@@ -333,9 +417,6 @@ function onPreUpdateItem(item, changes, options, userId) {
 /* PRE-CREATE ITEM HOOK                                         */
 /* ============================================================ */
 
-/**
- * Blocks item creation on actors when inventory is locked.
- */
 function onPreCreateItem(item, data, options, userId) {
     if (!item.parent || !(item.parent instanceof Actor)) return;
 
@@ -343,8 +424,17 @@ function onPreCreateItem(item, data, options, userId) {
     if (!user || user.role >= 3) return;
     if (isWhitelistedSource(options)) return;
 
-    if (isLocked("inventory", userId)) {
+    const level = getLockLevel("inventory", userId, "addItems");
+    if (level === "locked") {
         logCheatAttempt(user, item.parent, `Create item: ${data.name || "unknown"}`, "N/A", "new item");
+        return false;
+    }
+    if (level === "request") {
+        sendApprovalRequest(user, item.parent, `add "${data.name || "item"}" to inventory`, {
+            type: "createItem",
+            actorId: item.parent.id,
+            itemData: data
+        });
         return false;
     }
 }
@@ -353,17 +443,6 @@ function onPreCreateItem(item, data, options, userId) {
 /* PRE-DELETE ITEM HOOK                                         */
 /* ============================================================ */
 
-/**
- * Handles item deletion on actors when inventory is locked.
- *
- * Deletion IS allowed when:
- * - The item's quantity is 0 or 1 (consumed the last one — this is subtraction)
- * - The item has uses and they're depleted (used the last charge)
- *
- * Deletion is BLOCKED when:
- * - The item has quantity > 1 and a player tries to delete the whole stack
- *   (this could be trying to hide evidence or grief-delete items)
- */
 function onPreDeleteItem(item, options, userId) {
     if (!item.parent || !(item.parent instanceof Actor)) return;
 
@@ -371,18 +450,29 @@ function onPreDeleteItem(item, options, userId) {
     if (!user || user.role >= 3) return;
     if (isWhitelistedSource(options)) return;
 
-    if (isLocked("inventory", userId)) {
-        const quantity = item.system?.quantity ?? 0;
-        const usesValue = item.system?.uses?.value ?? null;
+    const level = getLockLevel("inventory", userId, "deleteItems");
+    if (level === "none") return;
 
-        // Allow deletion if quantity is 0 or 1 (last item consumed)
-        if (quantity <= 1) return;
+    const quantity = item.system?.quantity ?? 0;
+    const usesValue = item.system?.uses?.value ?? null;
 
-        // Allow deletion if uses are depleted (last charge used)
-        if (usesValue !== null && usesValue <= 0) return;
+    // Always allow deletion of the last item (consumption)
+    if (quantity <= 1) return;
 
-        // Block bulk deletion (player deleting a stack of items)
+    // Always allow deletion when uses are depleted
+    if (usesValue !== null && usesValue <= 0) return;
+
+    // Stack with remaining items — check lock level
+    if (level === "locked") {
         logCheatAttempt(user, item.parent, `Delete item: ${item.name} (qty: ${quantity})`, item.name, "deleted");
+        return false;
+    }
+    if (level === "request") {
+        sendApprovalRequest(user, item.parent, `delete "${item.name}" (qty: ${quantity})`, {
+            type: "deleteItem",
+            actorId: item.parent.id,
+            itemId: item.id
+        });
         return false;
     }
 }
@@ -391,13 +481,10 @@ function onPreDeleteItem(item, options, userId) {
 /* REGISTRATION                                                 */
 /* ============================================================ */
 
-/**
- * Register all validation hooks. Called during the ready hook.
- */
 export function registerValidationHooks() {
     Hooks.on("preUpdateActor", onPreUpdateActor);
     Hooks.on("preUpdateItem", onPreUpdateItem);
     Hooks.on("preCreateItem", onPreCreateItem);
     Hooks.on("preDeleteItem", onPreDeleteItem);
-    console.log("Lawful Sheets | Backend validation hooks registered.");
+    console.log("Lawful Sheets | Validation hooks registered.");
 }

@@ -1,6 +1,6 @@
 /**
- * Lawful Sheets v1.0.54
- * Enforces strict editing rules for Players with backend validation.
+ * Lawful Sheets v1.0.55
+ * Enforces strict editing rules for Players with hook-based validation.
  * CSS enforcement provides the UX layer; preUpdate hooks provide real security.
  *
  * @module lawful-sheets
@@ -30,15 +30,13 @@ Hooks.once("init", () => {
 Hooks.once("ready", () => {
     if (!game.user) return;
 
-    // Backend validation hooks run for ALL clients
     registerValidationHooks();
 
-    // CSS enforcement only for non-GM users (role < 3)
     if (game.user.role < 3) {
         applyEnforcement();
     }
 
-    console.log(`Lawful Sheets v1.0.54 | Ready. User: ${game.user.name} (Role ${game.user.role})`);
+    console.log(`Lawful Sheets v1.0.55 | Ready. User: ${game.user.name} (Role ${game.user.role})`);
 });
 
 /* ============================================================ */
@@ -48,8 +46,6 @@ Hooks.once("ready", () => {
 Hooks.on("getSceneControlButtons", (controls) => {
     if (!game.user || game.user.role < 3) return;
 
-    // V13 uses object format for controls
-    // controls.tokens is the token control group, .tools is an object
     const tokenGroup = controls.tokens;
     if (!tokenGroup) return;
 
@@ -65,4 +61,48 @@ Hooks.on("getSceneControlButtons", (controls) => {
             new LawfulManager().render(true);
         }
     };
+});
+
+/* ============================================================ */
+/* CHAT APPROVAL BUTTONS                                        */
+/* ============================================================ */
+
+/**
+ * Execute an approved action on the GM's client.
+ * Uses { lawfulApproved: true } in options to bypass validation.
+ */
+async function executeApproval(requestData) {
+    const opts = { lawfulApproved: true };
+    const { type, actorId, itemId, changes, itemData } = requestData;
+
+    if (type === "actor") {
+        await game.actors.get(actorId)?.update(changes, opts);
+    } else if (type === "updateItem") {
+        const actor = game.actors.get(actorId);
+        await actor?.items.get(itemId)?.update(changes, opts);
+    } else if (type === "createItem") {
+        await game.actors.get(actorId)?.createEmbeddedDocuments("Item", [itemData], opts);
+    } else if (type === "deleteItem") {
+        await game.actors.get(actorId)?.deleteEmbeddedDocuments("Item", [itemId], opts);
+    }
+}
+
+/**
+ * Wire up Approve / Deny buttons on Lawful Sheets approval chat cards.
+ * Only GMs can see these messages (they are whispered to GMs).
+ */
+Hooks.on("renderChatMessage", (message, html) => {
+    if (!game.user.isGM) return;
+    if (!message.flags?.[MODULE_ID]?.approvalRequest) return;
+
+    const requestData = message.flags[MODULE_ID].requestData;
+
+    html.querySelector("[data-action='lawful-approve']")?.addEventListener("click", async () => {
+        await executeApproval(requestData);
+        await message.delete();
+    });
+
+    html.querySelector("[data-action='lawful-deny']")?.addEventListener("click", async () => {
+        await message.delete();
+    });
 });

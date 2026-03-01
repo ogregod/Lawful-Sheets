@@ -7,8 +7,20 @@
 const MODULE_ID = "lawful-sheets";
 
 /**
+ * Subcategories for the Inventory lock category.
+ * Each can be configured independently or set to "inherit" from the parent.
+ */
+export const INVENTORY_SUBCATEGORIES = {
+    addItems:   { key: "lockInventoryAdd",      name: "Add Items" },
+    deleteItems:{ key: "lockInventoryDelete",   name: "Delete Items" },
+    equip:      { key: "lockInventoryEquip",    name: "Equip / Unequip" },
+    prepared:   { key: "lockInventoryPrepared", name: "Prepared State" },
+    quantity:   { key: "lockInventoryQuantity", name: "Increase Quantity" }
+};
+
+/**
  * All lock categories with their setting keys and display names.
- * Each category gets a global setting (none/player/all) and per-user overrides.
+ * Each category gets a global setting and per-user overrides.
  */
 export const LOCK_CATEGORIES = {
     editMode:     { key: "lockEditMode",     name: "Edit Mode" },
@@ -16,12 +28,29 @@ export const LOCK_CATEGORIES = {
     hp:           { key: "lockHp",           name: "HP & Hit Dice" },
     abilities:    { key: "lockAbilities",    name: "Ability Scores" },
     currency:     { key: "lockCurrency",     name: "Currency" },
-    inventory:    { key: "lockInventory",    name: "Inventory" },
+    inventory:    { key: "lockInventory",    name: "Inventory", subcategories: INVENTORY_SUBCATEGORIES },
     spellSlots:   { key: "lockSpellSlots",   name: "Spell Slots" },
     xp:           { key: "lockXp",           name: "Experience Points" },
     deathSaves:   { key: "lockDeathSaves",   name: "Death Saves" },
     tokenHud:     { key: "lockTokenHud",     name: "Token HUD" },
     refundButton: { key: "lockRefundButton", name: "Refund Button" }
+};
+
+/** Choices for top-level category settings */
+const CATEGORY_CHOICES = {
+    "none":    "Everyone Unlocked",
+    "player":  "Players Locked (Trusted Free)",
+    "all":     "Everyone Locked",
+    "request": "Request GM Approval"
+};
+
+/** Choices for inventory subcategory settings */
+const SUBCATEGORY_CHOICES = {
+    "inherit": "Inherit from Inventory",
+    "none":    "Everyone Unlocked",
+    "player":  "Players Locked (Trusted Free)",
+    "all":     "Everyone Locked",
+    "request": "Request GM Approval"
 };
 
 /**
@@ -44,12 +73,22 @@ export function registerSettings() {
             scope: "world",
             config: true,
             type: String,
-            choices: {
-                "none":   "Everyone Unlocked",
-                "player": "Players Locked (Trusted Free)",
-                "all":    "Everyone Locked"
-            },
+            choices: CATEGORY_CHOICES,
             default: "player",
+            requiresReload: true
+        });
+    }
+
+    // Register inventory subcategory settings
+    for (const [, sub] of Object.entries(INVENTORY_SUBCATEGORIES)) {
+        game.settings.register(MODULE_ID, sub.key, {
+            name: `Inventory: ${sub.name}`,
+            hint: `Lock behavior for ${sub.name}. "Inherit" follows the main Inventory setting.`,
+            scope: "world",
+            config: true,
+            type: String,
+            choices: SUBCATEGORY_CHOICES,
+            default: "inherit",
             requiresReload: true
         });
     }
@@ -75,33 +114,81 @@ export function registerSettings() {
     });
 }
 
+/* ============================================================ */
+/* LOCK LEVEL RESOLUTION                                        */
+/* ============================================================ */
+
 /**
- * Determine if a lock category is active for a given user.
- * Priority: per-user override > global setting > default unlocked.
- * GMs (role >= 3) always return false.
- *
- * @param {string} categoryId - Key from LOCK_CATEGORIES (e.g. "currency")
- * @param {string} userId - The user ID to check
- * @returns {boolean} True if the category is locked for this user
+ * Resolve a raw setting value + user into a lock level string.
+ * @param {string} setting - "none" | "player" | "all" | "request"
+ * @param {User} user
+ * @returns {"none"|"locked"|"request"}
  */
-export function isLocked(categoryId, userId) {
+function resolveLevel(setting, user) {
+    if (setting === "all")     return "locked";
+    if (setting === "request") return "request";
+    if (setting === "player" && !user.hasRole("TRUSTED")) return "locked";
+    return "none";
+}
+
+/**
+ * Get the effective lock level for a category (and optional subcategory) for a user.
+ * Priority: per-user override > subcategory global > parent category global.
+ * GMs always return "none".
+ *
+ * @param {string} categoryId - Key from LOCK_CATEGORIES (e.g. "inventory")
+ * @param {string} userId - The user ID to check
+ * @param {string|null} subId - Optional subcategory key (e.g. "equip")
+ * @returns {"none"|"locked"|"request"}
+ */
+export function getLockLevel(categoryId, userId, subId = null) {
     const user = game.users.get(userId);
-    if (!user || user.role >= 3) return false;
+    if (!user || user.role >= 3) return "none";
 
-    const cat = LOCK_CATEGORIES[categoryId];
-    if (!cat) return false;
-
-    // Check per-user override first
     const overrides = game.settings.get(MODULE_ID, "userOverrides") || {};
-    const userOverride = overrides[userId]?.[categoryId];
+    const overrideKey = subId ? `${categoryId}.${subId}` : categoryId;
+    const userOverride = overrides[userId]?.[overrideKey];
 
-    if (userOverride === "force-lock") return true;
-    if (userOverride === "force-unlock") return false;
+    if (userOverride === "force-lock")    return "locked";
+    if (userOverride === "force-unlock")  return "none";
+    if (userOverride === "force-request") return "request";
 
-    // Fall back to global setting
+    // Subcategory global setting (if subId given and not "inherit")
+    if (subId) {
+        const subCat = LOCK_CATEGORIES[categoryId]?.subcategories?.[subId];
+        if (subCat) {
+            const subGlobal = game.settings.get(MODULE_ID, subCat.key);
+            if (subGlobal !== "inherit") {
+                return resolveLevel(subGlobal, user);
+            }
+        }
+    }
+
+    // Parent category global setting
+    const cat = LOCK_CATEGORIES[categoryId];
+    if (!cat) return "none";
     const globalSetting = game.settings.get(MODULE_ID, cat.key);
-    if (globalSetting === "all") return true;
-    if (globalSetting === "player" && !user.hasRole("TRUSTED")) return true;
+    return resolveLevel(globalSetting, user);
+}
 
-    return false;
+/**
+ * Returns true if the category is hard-locked for the user.
+ * @param {string} categoryId
+ * @param {string} userId
+ * @param {string|null} subId
+ * @returns {boolean}
+ */
+export function isLocked(categoryId, userId, subId = null) {
+    return getLockLevel(categoryId, userId, subId) === "locked";
+}
+
+/**
+ * Returns true if the category requires GM approval for the user.
+ * @param {string} categoryId
+ * @param {string} userId
+ * @param {string|null} subId
+ * @returns {boolean}
+ */
+export function isRequest(categoryId, userId, subId = null) {
+    return getLockLevel(categoryId, userId, subId) === "request";
 }

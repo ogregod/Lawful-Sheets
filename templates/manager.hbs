@@ -1,8 +1,10 @@
 <form class="lawful-manager-form">
     <p class="lawful-manager-hint">
-        Configure per-user overrides below. <strong>"Default"</strong> follows the Global setting
-        (configured in Module Settings). <strong>"Lock"</strong> forces the lock regardless of role.
+        Configure per-user overrides below. <strong>"Default"</strong> follows the Global setting.
+        <strong>"Lock"</strong> forces the lock regardless of role.
         <strong>"Unlock"</strong> exempts the user from that lock.
+        <strong>"Request"</strong> sends a GM approval chat card instead of blocking outright.
+        Indented rows under <em>Inventory</em> are subcategories that override it.
     </p>
 
     <div class="lawful-manager-body">
@@ -10,8 +12,10 @@
             <thead>
                 <tr>
                     <th class="user-col">User</th>
-                    {{#each categories}}
-                    <th class="category-col" title="Global: {{this.globalLabel}}">{{this.name}}</th>
+                    {{#each columns}}
+                    <th class="category-col {{#if this.isSub}}sub-col{{/if}}" title="Global: {{this.globalLabel}}">
+                        {{#if this.isSub}}<span class="sub-indent">↳</span>{{/if}}{{this.name}}
+                    </th>
                     {{/each}}
                     <th class="action-col"></th>
                 </tr>
@@ -24,11 +28,11 @@
                         <span class="user-role {{this.roleClass}}">{{this.role}}</span>
                     </td>
                     {{#each this.cells}}
-                    <td class="category-col">
+                    <td class="category-col {{#if this.isSub}}sub-col{{/if}}">
                         <select name="{{this.name}}">
-                            <option value="default" {{#if this.isDefault}}selected{{/if}}>Default</option>
-                            <option value="force-lock" {{#if this.isLock}}selected{{/if}}>Lock</option>
-                            <option value="force-unlock" {{#if this.isUnlock}}selected{{/if}}>Unlock</option>
+                            {{#each this.choices}}
+                            <option value="{{this.value}}" {{#if this.selected}}selected{{/if}}>{{this.label}}</option>
+                            {{/each}}
                         </select>
                     </td>
                     {{/each}}
