@@ -111,9 +111,18 @@ export const pendingRequests = new Map();
 
 /**
  * Delete a dot-notation path from a nested object.
+ * Handles both flat dot-notation keys (e.g. { "system.spells.points.value": 15 })
+ * and fully nested objects (e.g. { system: { currency: { gp: 10 } } }).
  * Cleans up empty parent containers afterward.
  */
 function deletePath(obj, path) {
+    // Fast path: the key exists directly on the object as a flat dot-notation string.
+    // dnd5e sometimes sends updates this way (e.g. spell points, individual fields).
+    if (Object.prototype.hasOwnProperty.call(obj, path)) {
+        delete obj[path];
+        return;
+    }
+
     const parts = path.split(".");
     let current = obj;
 
