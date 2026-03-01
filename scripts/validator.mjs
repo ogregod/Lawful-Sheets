@@ -330,14 +330,19 @@ function onPreUpdateItem(item, changes, options, userId) {
     if (isWhitelistedSource(options)) return;
 
     const flat = foundry.utils.flattenObject(changes);
-    let blocked = false;
+    const allowedFlat = {};   // paths that are permitted to go through
+    let anyBlocked = false;
 
     for (const [path, newValue] of Object.entries(flat)) {
-        if (path === "_id") continue;
+        // Always preserve internal Foundry fields
+        if (path === "_id" || path.startsWith("_")) {
+            allowedFlat[path] = newValue;
+            continue;
+        }
 
-        // --- Inventory subcategory path checks ---
+        let pathBlocked = false;
 
-        // NUMERIC PATHS (quantity, uses.value): routed through "quantity" subcategory
+        // NUMERIC PATHS (quantity, uses.value): "quantity" subcategory, subtraction rule
         const numericMatch = INVENTORY_NUMERIC_PATHS.some(p => p.test(path));
         if (numericMatch) {
             const level = getLockLevel("inventory", userId, "quantity");
@@ -345,12 +350,10 @@ function onPreUpdateItem(item, changes, options, userId) {
                 const oldNum = Number(foundry.utils.getProperty(item, path)) || 0;
                 const newNum = Number(newValue) || 0;
                 if (newNum > oldNum) {
-                    // Increase = potentially cheating
                     const oldValue = foundry.utils.getProperty(item, path);
                     if (level === "locked") {
                         logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
-                        deletePath(changes, path);
-                        blocked = true;
+                        pathBlocked = true;
                     } else if (level === "request") {
                         sendApprovalRequest(user, item.parent, `increase ${path} on ${item.name}`, {
                             type: "updateItem",
@@ -358,12 +361,13 @@ function onPreUpdateItem(item, changes, options, userId) {
                             itemId: item.id,
                             changes: { [path]: newValue }
                         });
-                        deletePath(changes, path);
-                        blocked = true;
+                        pathBlocked = true;
                     }
                 }
-                // Decrease = legitimate usage, always allow
+                // Decrease or same = legitimate usage, always allow
             }
+            if (!pathBlocked) allowedFlat[path] = newValue;
+            else anyBlocked = true;
             continue;
         }
 
@@ -375,8 +379,7 @@ function onPreUpdateItem(item, changes, options, userId) {
                 const oldValue = foundry.utils.getProperty(item, path);
                 if (level === "locked") {
                     logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
-                    deletePath(changes, path);
-                    blocked = true;
+                    pathBlocked = true;
                 } else if (level === "request") {
                     const labels = { equip: "equip/unequip", prepared: "change prepared state", quantity: "modify uses" };
                     sendApprovalRequest(user, item.parent, `${labels[subMatch.subId] ?? path} on ${item.name}`, {
@@ -385,10 +388,11 @@ function onPreUpdateItem(item, changes, options, userId) {
                         itemId: item.id,
                         changes: { [path]: newValue }
                     });
-                    deletePath(changes, path);
-                    blocked = true;
+                    pathBlocked = true;
                 }
             }
+            if (!pathBlocked) allowedFlat[path] = newValue;
+            else anyBlocked = true;
             continue;
         }
 
@@ -401,8 +405,7 @@ function onPreUpdateItem(item, changes, options, userId) {
                     if (newNum > oldNum) {
                         logCheatAttempt(user, item, `${item.name} > ${path}`,
                             foundry.utils.getProperty(item, path), newValue);
-                        deletePath(changes, path);
-                        blocked = true;
+                        pathBlocked = true;
                     }
                     break;
                 }
@@ -410,24 +413,31 @@ function onPreUpdateItem(item, changes, options, userId) {
         }
 
         // Hit dice paths on class-type items (HP lock)
-        if (item.type === "class" && isLocked("hp", userId)) {
+        if (!pathBlocked && item.type === "class" && isLocked("hp", userId)) {
             for (const pattern of HIT_DICE_ITEM_PATHS) {
                 if (pattern.test(path)) {
                     logCheatAttempt(user, item, `${item.name} > ${path}`,
                         foundry.utils.getProperty(item, path), newValue);
-                    deletePath(changes, path);
-                    blocked = true;
+                    pathBlocked = true;
                     break;
                 }
             }
         }
+
+        if (!pathBlocked) allowedFlat[path] = newValue;
+        else anyBlocked = true;
     }
 
-    if (blocked) {
-        const remaining = foundry.utils.flattenObject(changes);
-        const meaningfulKeys = Object.keys(remaining).filter(k => k !== "_id");
-        if (meaningfulKeys.length === 0) return false;
+    if (!anyBlocked) return; // Nothing was blocked, let original update through
+
+    // Something was blocked. Always cancel the original update.
+    // If there are remaining allowed changes, re-issue them with the bypass flag
+    // so they pass through validation without triggering hooks again.
+    const allowedKeys = Object.keys(allowedFlat).filter(k => !k.startsWith("_"));
+    if (allowedKeys.length > 0) {
+        item.update(allowedFlat, { ...options, lawfulApproved: true });
     }
+    return false;
 }
 
 /* ============================================================ */
