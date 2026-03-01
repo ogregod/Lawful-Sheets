@@ -98,6 +98,23 @@
     color: #2e8b57;
 }
 
+/* ---- Group Header Row ---- */
+
+.lawful-manager-table .group-header-row th {
+    border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+    padding: 4px 3px 2px;
+}
+
+.lawful-manager-table .group-header-col {
+    font-size: 0.78em;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #444;
+    text-align: center;
+    border-radius: 3px 3px 0 0;
+}
+
 /* ---- Subcategory Columns ---- */
 
 .lawful-manager-table th.sub-col,

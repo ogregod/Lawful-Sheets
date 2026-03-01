@@ -19,21 +19,30 @@ export const INVENTORY_SUBCATEGORIES = {
 };
 
 /**
- * All lock categories with their setting keys and display names.
- * Each category gets a global setting and per-user overrides.
+ * All lock categories with their setting keys, display names, and group.
+ * Order determines display order in module settings and the Lawful Manager.
+ *
+ * Groups: "character" | "resources" | "inventory" | "ui"
  */
 export const LOCK_CATEGORIES = {
-    editMode:     { key: "lockEditMode",     name: "Edit Mode" },
-    contextMenu:  { key: "lockContextMenu",  name: "Context Menus" },
-    hp:           { key: "lockHp",           name: "HP & Hit Dice" },
-    abilities:    { key: "lockAbilities",    name: "Ability Scores" },
-    currency:     { key: "lockCurrency",     name: "Currency" },
-    inventory:    { key: "lockInventory",    name: "Inventory", subcategories: INVENTORY_SUBCATEGORIES },
-    spellSlots:   { key: "lockSpellSlots",   name: "Spell Slots" },
-    xp:           { key: "lockXp",           name: "Experience Points" },
-    deathSaves:   { key: "lockDeathSaves",   name: "Death Saves" },
-    tokenHud:     { key: "lockTokenHud",     name: "Token HUD" },
-    refundButton: { key: "lockRefundButton", name: "Refund Button" }
+    // ── Character Stats ──────────────────────────────────────────
+    hp:           { key: "lockHp",           name: "HP & Hit Dice",    group: "character" },
+    abilities:    { key: "lockAbilities",    name: "Ability Scores",   group: "character" },
+    deathSaves:   { key: "lockDeathSaves",   name: "Death Saves",      group: "character" },
+
+    // ── Resources ────────────────────────────────────────────────
+    currency:     { key: "lockCurrency",     name: "Currency",         group: "resources" },
+    spellSlots:   { key: "lockSpellSlots",   name: "Spell Slots",      group: "resources" },
+    xp:           { key: "lockXp",           name: "Experience Points", group: "resources" },
+
+    // ── Inventory ────────────────────────────────────────────────
+    inventory:    { key: "lockInventory",    name: "Inventory",        group: "inventory", subcategories: INVENTORY_SUBCATEGORIES },
+
+    // ── Sheet UI ─────────────────────────────────────────────────
+    tokenHud:     { key: "lockTokenHud",     name: "Token HUD",        group: "ui" },
+    editMode:     { key: "lockEditMode",     name: "Edit Mode",        group: "ui" },
+    contextMenu:  { key: "lockContextMenu",  name: "Context Menus",    group: "ui" },
+    refundButton: { key: "lockRefundButton", name: "Refund Button",    group: "ui" }
 };
 
 /** Choices for top-level category settings */

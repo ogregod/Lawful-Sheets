@@ -256,17 +256,25 @@ function onPreUpdateActor(actor, changes, options, userId) {
             const level = getLockLevel(mapping.category, userId);
             if (level === "none") break;
 
+            const oldValue = foundry.utils.getProperty(actor, path);
+
+            // Skip if the value didn't actually change.
+            // dnd5e often sends full objects (all currency fields, all HP fields)
+            // even when only one field was edited. We only act on real changes.
+            // Use numeric comparison so that null and 0 are treated as equivalent
+            // (e.g. system.attributes.hp.temp going from 0 → null is not a real change).
+            const oldNum = Number(oldValue ?? 0);
+            const newNum = Number(newValue ?? 0);
+            const noRealChange = oldValue === newValue || (!isNaN(oldNum) && !isNaN(newNum) && oldNum === newNum);
+            if (noRealChange) break;
+
             // Special case: spell slot / spell point VALUE paths use subtraction rule
             if (mapping.category === "spellSlots") {
                 const isNumericSpellPath = SPELL_NUMERIC_PATHS.some(p => p.test(path));
                 if (isNumericSpellPath) {
-                    const oldNum = Number(foundry.utils.getProperty(actor, path)) || 0;
-                    const newNum = Number(newValue) || 0;
                     if (newNum <= oldNum) break; // Decrease = consumption, allow it
                 }
             }
-
-            const oldValue = foundry.utils.getProperty(actor, path);
 
             if (level === "locked") {
                 logCheatAttempt(user, actor, path, oldValue, newValue);

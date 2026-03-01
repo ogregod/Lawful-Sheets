@@ -10,6 +10,13 @@
     <div class="lawful-manager-body">
         <table class="lawful-manager-table">
             <thead>
+                <tr class="group-header-row">
+                    <th class="user-col"></th>
+                    {{#each groupSpans}}
+                    <th colspan="{{this.colspan}}" class="group-header-col" style="{{this.style}}">{{this.label}}</th>
+                    {{/each}}
+                    <th class="action-col"></th>
+                </tr>
                 <tr>
                     <th class="user-col">User</th>
                     {{#each columns}}

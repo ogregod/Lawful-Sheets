@@ -26,6 +26,14 @@ const GLOBAL_LABELS = {
     "request": "Request Approval"
 };
 
+/** Display names and styles for column groups */
+const GROUP_META = {
+    character: { label: "Character Stats", style: "background:rgba(100,149,237,0.12);" },
+    resources: { label: "Resources",       style: "background:rgba(46,139,87,0.12);" },
+    inventory: { label: "Inventory",       style: "background:rgba(205,133,63,0.12);" },
+    ui:        { label: "Sheet UI",        style: "background:rgba(150,100,200,0.12);" }
+};
+
 /**
  * Build a single cell descriptor for a given user and override key.
  */
@@ -112,15 +120,30 @@ export class LawfulManager extends HandlebarsApplicationMixin(ApplicationV2) {
         });
 
         // Build flat column list (parent categories + subcategories interleaved)
+        // and compute group header spans for the table's top header row.
         context.columns = [];
+        const groupSpans = []; // [{ label, style, colspan }]
+        let currentGroup = null;
+
         for (const cat of context.categories) {
+            const group = cat.group ?? "ui";
+            if (group !== currentGroup) {
+                const meta = GROUP_META[group] ?? { label: group, style: "" };
+                groupSpans.push({ label: meta.label, style: meta.style, colspan: 0 });
+                currentGroup = group;
+            }
+            groupSpans[groupSpans.length - 1].colspan++;
             context.columns.push({ ...cat, isSub: false });
+
             if (cat.subcategories) {
                 for (const sub of cat.subcategories) {
+                    groupSpans[groupSpans.length - 1].colspan++;
                     context.columns.push({ ...sub, isSub: true });
                 }
             }
         }
+
+        context.groupSpans = groupSpans;
 
         // Build user rows
         context.users = game.users
