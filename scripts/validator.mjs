@@ -218,11 +218,11 @@ function sendApprovalRequest(user, actor, label, requestData) {
             <strong style="color: #f0a500;">&#9889; Lawful Sheets &mdash; Approval Request</strong><br>
             <b>${user.name}</b> wants to <b>${label}</b> on <b>${actorName}</b><br>
             <div style="margin-top: 6px; display: flex; gap: 6px;">
-                <button data-action="lawful-approve" data-request-id="${requestId}"
+                <button data-lawful-action="approve"
                     style="background:#4caf50;color:#fff;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;">
                     Approve
                 </button>
-                <button data-action="lawful-deny" data-request-id="${requestId}"
+                <button data-lawful-action="deny"
                     style="background:#f44336;color:#fff;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;">
                     Deny
                 </button>

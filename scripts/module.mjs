@@ -97,12 +97,16 @@ Hooks.on("renderChatMessage", (message, html) => {
 
     const requestData = message.flags[MODULE_ID].requestData;
 
-    html.querySelector("[data-action='lawful-approve']")?.addEventListener("click", async () => {
+    // In Foundry V13, html is a jQuery object — unwrap to get the DOM element
+    const el = html instanceof HTMLElement ? html : html[0];
+    if (!el) return;
+
+    el.querySelector("[data-lawful-action='approve']")?.addEventListener("click", async () => {
         await executeApproval(requestData);
         await message.delete();
     });
 
-    html.querySelector("[data-action='lawful-deny']")?.addEventListener("click", async () => {
+    el.querySelector("[data-lawful-action='deny']")?.addEventListener("click", async () => {
         await message.delete();
     });
 });
