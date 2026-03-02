@@ -11,7 +11,7 @@ export const MODULE_ID = "lawful-sheets";
 
 import { registerSettings } from "./settings.mjs";
 import { applyEnforcement } from "./enforcer.mjs";
-import { registerValidationHooks } from "./validator.mjs";
+import { registerValidationHooks, handleTradeSocket } from "./validator.mjs";
 import { LawfulManager } from "./manager.mjs";
 
 /* ============================================================ */
@@ -31,12 +31,13 @@ Hooks.once("ready", () => {
     if (!game.user) return;
 
     registerValidationHooks();
+    game.socket.on(`module.${MODULE_ID}`, handleTradeSocket);
 
     if (game.user.role < 3) {
         applyEnforcement();
     }
 
-    console.log(`Lawful Sheets v1.0.55 | Ready. User: ${game.user.name} (Role ${game.user.role})`);
+    console.log(`Lawful Sheets v1.0.57 | Ready. User: ${game.user.name} (Role ${game.user.role})`);
 });
 
 /* ============================================================ */

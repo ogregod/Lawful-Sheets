@@ -7,6 +7,15 @@
 const MODULE_ID = "lawful-sheets";
 
 /**
+ * Subcategories for the HP & Hit Dice lock category.
+ */
+export const HP_SUBCATEGORIES = {
+    current:  { key: "lockHpCurrent",  name: "Current HP / Temp HP" },
+    max:      { key: "lockHpMax",      name: "Max HP" },
+    hitDice:  { key: "lockHpHitDice",  name: "Hit Dice" }
+};
+
+/**
  * Subcategories for the Inventory lock category.
  * Each can be configured independently or set to "inherit" from the parent.
  */
@@ -15,7 +24,7 @@ export const INVENTORY_SUBCATEGORIES = {
     deleteItems:{ key: "lockInventoryDelete",   name: "Delete Items" },
     equip:      { key: "lockInventoryEquip",    name: "Equip / Unequip" },
     prepared:   { key: "lockInventoryPrepared", name: "Prepared State" },
-    quantity:   { key: "lockInventoryQuantity", name: "Increase Quantity" }
+    quantity:   { key: "lockInventoryQuantity", name: "Quantity / Charges" }
 };
 
 /**
@@ -26,23 +35,26 @@ export const INVENTORY_SUBCATEGORIES = {
  */
 export const LOCK_CATEGORIES = {
     // ── Character Stats ──────────────────────────────────────────
-    hp:           { key: "lockHp",           name: "HP & Hit Dice",    group: "character" },
-    abilities:    { key: "lockAbilities",    name: "Ability Scores",   group: "character" },
-    deathSaves:   { key: "lockDeathSaves",   name: "Death Saves",      group: "character" },
+    hp:           { key: "lockHp",           name: "HP & Hit Dice",          group: "character", subcategories: HP_SUBCATEGORIES },
+    abilities:    { key: "lockAbilities",    name: "Ability Scores",         group: "character" },
+    deathSaves:   { key: "lockDeathSaves",   name: "Death Saves",            group: "character" },
+    inspiration:  { key: "lockInspiration",  name: "Inspiration",            group: "character" },
+    exhaustion:   { key: "lockExhaustion",   name: "Exhaustion",             group: "character" },
 
     // ── Resources ────────────────────────────────────────────────
-    currency:     { key: "lockCurrency",     name: "Currency",         group: "resources" },
-    spellSlots:   { key: "lockSpellSlots",   name: "Spell Slots",      group: "resources" },
-    xp:           { key: "lockXp",           name: "Experience Points", group: "resources" },
+    currency:     { key: "lockCurrency",     name: "Currency",               group: "resources" },
+    spellSlots:   { key: "lockSpellSlots",   name: "Spell Slots / Points",   group: "resources" },
+    resources:    { key: "lockResources",    name: "Class Resources",        group: "resources" },
+    xp:           { key: "lockXp",           name: "Experience Points",      group: "resources" },
 
     // ── Inventory ────────────────────────────────────────────────
-    inventory:    { key: "lockInventory",    name: "Inventory",        group: "inventory", subcategories: INVENTORY_SUBCATEGORIES },
+    inventory:    { key: "lockInventory",    name: "Inventory",              group: "inventory", subcategories: INVENTORY_SUBCATEGORIES },
 
     // ── Sheet UI ─────────────────────────────────────────────────
-    tokenHud:     { key: "lockTokenHud",     name: "Token HUD",        group: "ui" },
-    editMode:     { key: "lockEditMode",     name: "Edit Mode",        group: "ui" },
-    contextMenu:  { key: "lockContextMenu",  name: "Context Menus",    group: "ui" },
-    refundButton: { key: "lockRefundButton", name: "Refund Button",    group: "ui" }
+    tokenHud:     { key: "lockTokenHud",     name: "Token HUD",              group: "ui" },
+    editMode:     { key: "lockEditMode",     name: "Edit Mode",              group: "ui" },
+    contextMenu:  { key: "lockContextMenu",  name: "Context Menus",          group: "ui" },
+    refundButton: { key: "lockRefundButton", name: "Refund Button",          group: "ui" }
 };
 
 /** Choices for top-level category settings */
@@ -88,18 +100,21 @@ export function registerSettings() {
         });
     }
 
-    // Register inventory subcategory settings
-    for (const [, sub] of Object.entries(INVENTORY_SUBCATEGORIES)) {
-        game.settings.register(MODULE_ID, sub.key, {
-            name: `Inventory: ${sub.name}`,
-            hint: `Lock behavior for ${sub.name}. "Inherit" follows the main Inventory setting.`,
-            scope: "world",
-            config: true,
-            type: String,
-            choices: SUBCATEGORY_CHOICES,
-            default: "inherit",
-            requiresReload: true
-        });
+    // Register subcategory settings for every lock category that has them
+    for (const [, cat] of Object.entries(LOCK_CATEGORIES)) {
+        if (!cat.subcategories) continue;
+        for (const [, sub] of Object.entries(cat.subcategories)) {
+            game.settings.register(MODULE_ID, sub.key, {
+                name: `${cat.name}: ${sub.name}`,
+                hint: `Lock behavior for ${sub.name}. "Inherit" follows the main "${cat.name}" setting.`,
+                scope: "world",
+                config: true,
+                type: String,
+                choices: SUBCATEGORY_CHOICES,
+                default: "inherit",
+                requiresReload: true
+            });
+        }
     }
 
     // Cheat detection logging toggle

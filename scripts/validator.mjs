@@ -4,7 +4,7 @@
  * to reject or escalate unauthorized data changes on the client.
  */
 
-import { isLocked, isRequest, getLockLevel } from "./settings.mjs";
+import { isLocked, getLockLevel } from "./settings.mjs";
 
 const MODULE_ID = "lawful-sheets";
 
@@ -17,10 +17,18 @@ const MODULE_ID = "lawful-sheets";
  * Each entry: { pattern: RegExp, category: string }
  */
 const ACTOR_PATH_MAP = [
-    // HP & Hit Dice
-    { pattern: /^system\.attributes\.hp\./,  category: "hp" },
-    { pattern: /^system\.attributes\.hd\./,  category: "hp" },
-    { pattern: /^system\.attributes\.hd$/,   category: "hp" },
+    // HP — Current HP / Temp HP (more specific patterns first)
+    { pattern: /^system\.attributes\.hp\.value$/,   category: "hp", subId: "current" },
+    { pattern: /^system\.attributes\.hp\.temp/,     category: "hp", subId: "current" },  // .temp + .tempmax
+    { pattern: /^system\.attributes\.hp\.min$/,     category: "hp", subId: "current" },
+    // HP — Max HP
+    { pattern: /^system\.attributes\.hp\.max/,      category: "hp", subId: "max" },
+    { pattern: /^system\.attributes\.hp\.formula$/, category: "hp", subId: "max" },
+    // HP — catch-all for any other hp sub-paths (treated as current)
+    { pattern: /^system\.attributes\.hp\./,         category: "hp", subId: "current" },
+    // Hit Dice
+    { pattern: /^system\.attributes\.hd\./,         category: "hp", subId: "hitDice" },
+    { pattern: /^system\.attributes\.hd$/,          category: "hp", subId: "hitDice" },
 
     // Ability Scores
     { pattern: /^system\.abilities\.\w+\.value$/, category: "abilities" },
@@ -29,9 +37,13 @@ const ACTOR_PATH_MAP = [
     { pattern: /^system\.currency\./,  category: "currency" },
     { pattern: /^system\.currency$/,   category: "currency" },
 
-    // Spell Slots
+    // Spell Slots & Spell Points
     { pattern: /^system\.spells\./,  category: "spellSlots" },
     { pattern: /^system\.spells$/,   category: "spellSlots" },
+
+    // Class Resources (ki points, rage uses, bardic inspiration charges, etc.)
+    { pattern: /^system\.resources\./, category: "resources" },
+    { pattern: /^system\.resources$/,  category: "resources" },
 
     // Experience Points
     { pattern: /^system\.details\.xp\./, category: "xp" },
@@ -39,15 +51,13 @@ const ACTOR_PATH_MAP = [
 
     // Death Saves
     { pattern: /^system\.attributes\.death\./, category: "deathSaves" },
-    { pattern: /^system\.attributes\.death$/,  category: "deathSaves" }
-];
+    { pattern: /^system\.attributes\.death$/,  category: "deathSaves" },
 
-/**
- * Spell slot / spell point VALUE paths where decreases are allowed (consumption).
- * Increases are still blocked when spellSlots is locked.
- */
-const SPELL_NUMERIC_PATHS = [
-    /^system\.spells\.\w+\.value$/   // e.g. spell1.value, spell2.value, points.value
+    // Inspiration
+    { pattern: /^system\.attributes\.inspiration$/, category: "inspiration" },
+
+    // Exhaustion
+    { pattern: /^system\.attributes\.exhaustion$/, category: "exhaustion" }
 ];
 
 /**
@@ -115,6 +125,63 @@ const HIT_DICE_ITEM_PATHS = [
  * data for cross-client approval is stored in the chat message flags.
  */
 export const pendingRequests = new Map();
+
+/* ============================================================ */
+/* TRADE DETECTION                                              */
+/* ============================================================ */
+
+/**
+ * Cross-client registry of recent currency decreases that may be the "payer"
+ * side of a legitimate trade.
+ *
+ * When a non-GM player's currency DECREASES on any client, that client
+ * broadcasts a socket message. All other clients receive it and add an entry
+ * here. When a currency INCREASE is then detected on a different actor,
+ * consumeTradeDecrease checks for a match and, if found, allows the increase.
+ *
+ * Key: "${path}:${amount}"  (e.g. "system.currency.gp:5")
+ * Value: Array of { actorId, timestamp }
+ */
+const pendingTradeDecreases = new Map();
+
+const TRADE_WINDOW_MS = 30_000;
+
+/** Called by the module's socket listener to register a remote trade decrease. */
+export function handleTradeSocket(data) {
+    if (data?.type !== "lawful-trade-decrease") return;
+    const { path, amount, actorId, timestamp } = data;
+    const key = `${path}:${amount}`;
+    if (!pendingTradeDecreases.has(key)) pendingTradeDecreases.set(key, []);
+    pendingTradeDecreases.get(key).push({ actorId, timestamp });
+    _cleanExpiredTrades();
+}
+
+function _cleanExpiredTrades() {
+    const cutoff = Date.now() - TRADE_WINDOW_MS;
+    for (const [key, entries] of pendingTradeDecreases) {
+        const fresh = entries.filter(e => e.timestamp > cutoff);
+        if (fresh.length === 0) pendingTradeDecreases.delete(key);
+        else pendingTradeDecreases.set(key, fresh);
+    }
+}
+
+/**
+ * Check whether a currency increase on receiverActorId can be matched against
+ * a pending trade decrease of the same path/amount from a different actor.
+ * Consumes the match if found.
+ * @returns {boolean} true if this increase is part of a legitimate trade
+ */
+function consumeTradeDecrease(path, amount, receiverActorId) {
+    _cleanExpiredTrades();
+    const key = `${path}:${amount}`;
+    const entries = pendingTradeDecreases.get(key);
+    if (!entries || entries.length === 0) return false;
+    const idx = entries.findIndex(e => e.actorId !== receiverActorId);
+    if (idx < 0) return false;
+    entries.splice(idx, 1);
+    if (entries.length === 0) pendingTradeDecreases.delete(key);
+    return true;
+}
 
 /* ============================================================ */
 /* UTILITY FUNCTIONS                                            */
@@ -273,7 +340,7 @@ function onPreUpdateActor(actor, changes, options, userId) {
         for (const mapping of ACTOR_PATH_MAP) {
             if (!mapping.pattern.test(path)) continue;
 
-            const level = getLockLevel(mapping.category, userId);
+            const level = getLockLevel(mapping.category, userId, mapping.subId ?? null);
             if (level === "none") break;
 
             const oldValue = foundry.utils.getProperty(actor, path);
@@ -288,13 +355,33 @@ function onPreUpdateActor(actor, changes, options, userId) {
             const noRealChange = oldValue === newValue || (!isNaN(oldNum) && !isNaN(newNum) && oldNum === newNum);
             if (noRealChange) break;
 
-            // Special case: spell slot / spell point VALUE paths use subtraction rule
-            if (mapping.category === "spellSlots") {
-                const isNumericSpellPath = SPELL_NUMERIC_PATHS.some(p => p.test(path));
-                if (isNumericSpellPath) {
-                    if (newNum <= oldNum) break; // Decrease = consumption, allow it
+            // Currency trade detection:
+            // - Decrease → always allow (paying in a trade / spending). Broadcast via socket
+            //   so every other client can record this as a pending trade offer.
+            // - Increase → allow only if a matching decrease from a DIFFERENT actor was
+            //   recently broadcast (i.e. it's the receive-side of a legitimate trade).
+            //   Otherwise fall through to the lock/block logic.
+            if (mapping.category === "currency") {
+                if (newNum < oldNum) {
+                    game.socket.emit(`module.${MODULE_ID}`, {
+                        type: "lawful-trade-decrease",
+                        path,
+                        amount: oldNum - newNum,
+                        actorId: actor.id,
+                        timestamp: Date.now()
+                    });
+                    break; // Allow the decrease
+                }
+                if (newNum > oldNum) {
+                    if (consumeTradeDecrease(path, newNum - oldNum, actor.id)) break; // Trade, allow
+                    // No matching trade offer — fall through to block/request
                 }
             }
+
+            // Spell slots: ALL manual changes are blocked regardless of direction.
+            // Legitimate consumption (casting spells) arrives with isActivity=true and
+            // is already whitelisted by isWhitelistedSource before reaching this point.
+            // Rests (isRest=true) are likewise whitelisted, so recovery still works.
 
             if (level === "locked") {
                 logCheatAttempt(user, actor, path, oldValue, newValue);
@@ -353,19 +440,38 @@ function onPreUpdateItem(item, changes, options, userId) {
 
         let pathBlocked = false;
 
-        // NUMERIC PATHS (quantity, uses.value): "quantity" subcategory, subtraction rule
+        // NUMERIC PATHS (quantity, uses.value)
+        // - spellSlots lock active → block ALL manual changes in both directions.
+        //   Spell casting (isActivity=true) and rests (isRest=true) are already
+        //   whitelisted above, so legitimate usage always goes through.
+        // - spellSlots lock inactive → subtraction rule: block increases only
+        //   (gaining resources is cheating; spending is legitimate consumption).
         const numericMatch = INVENTORY_NUMERIC_PATHS.some(p => p.test(path));
         if (numericMatch) {
-            const level = getLockLevel("inventory", userId, "quantity");
-            if (level !== "none") {
-                const oldNum = Number(foundry.utils.getProperty(item, path)) || 0;
-                const newNum = Number(newValue) || 0;
-                if (newNum > oldNum) {
-                    const oldValue = foundry.utils.getProperty(item, path);
-                    if (level === "locked") {
+            const inventoryLevel = getLockLevel("inventory", userId, "quantity");
+            const spellSlotsLevel = getLockLevel("spellSlots", userId);
+            const oldNum = Number(foundry.utils.getProperty(item, path)) || 0;
+            const newNum = Number(newValue) || 0;
+            if (oldNum !== newNum) {
+                const oldValue = foundry.utils.getProperty(item, path);
+                if (spellSlotsLevel !== "none") {
+                    if (spellSlotsLevel === "locked") {
                         logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
                         pathBlocked = true;
-                    } else if (level === "request") {
+                    } else if (spellSlotsLevel === "request") {
+                        sendApprovalRequest(user, item.parent, `modify ${path} on ${item.name}`, {
+                            type: "updateItem",
+                            actorId: item.parent.id,
+                            itemId: item.id,
+                            changes: { [path]: newValue }
+                        });
+                        pathBlocked = true;
+                    }
+                } else if (inventoryLevel !== "none" && newNum > oldNum) {
+                    if (inventoryLevel === "locked") {
+                        logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
+                        pathBlocked = true;
+                    } else if (inventoryLevel === "request") {
                         sendApprovalRequest(user, item.parent, `increase ${path} on ${item.name}`, {
                             type: "updateItem",
                             actorId: item.parent.id,
@@ -375,28 +481,44 @@ function onPreUpdateItem(item, changes, options, userId) {
                         pathBlocked = true;
                     }
                 }
-                // Decrease or same = legitimate usage, always allow
             }
             if (!pathBlocked) allowedFlat[path] = newValue;
             else anyBlocked = true;
             continue;
         }
 
-        // INVERSE NUMERIC PATHS (uses.spent): "quantity" subcategory, inverted subtraction rule.
-        // In dnd5e v4, uses.value is derived as (max - spent). A player who reduces spent is
-        // effectively gaining resources — the cheating direction. Block decreases, allow increases.
+        // INVERSE NUMERIC PATHS (uses.spent)
+        // In dnd5e v4, uses.value is derived as (max - spent).
+        // - spellSlots lock active → block ALL manual changes in both directions (same
+        //   logic as uses.value above; spell casting is whitelisted via isActivity).
+        // - spellSlots lock inactive → inverted subtraction rule: block decreases only
+        //   (reducing spent = recovering resources = cheating; increasing spent = using = OK).
         const inverseNumericMatch = INVENTORY_INVERSE_NUMERIC_PATHS.some(p => p.test(path));
         if (inverseNumericMatch) {
-            const level = getLockLevel("inventory", userId, "quantity");
-            if (level !== "none") {
-                const oldNum = Number(foundry.utils.getProperty(item, path)) || 0;
-                const newNum = Number(newValue) || 0;
-                if (newNum < oldNum) {
-                    const oldValue = foundry.utils.getProperty(item, path);
-                    if (level === "locked") {
+            const inventoryLevel = getLockLevel("inventory", userId, "quantity");
+            const spellSlotsLevel = getLockLevel("spellSlots", userId);
+            const oldNum = Number(foundry.utils.getProperty(item, path)) || 0;
+            const newNum = Number(newValue) || 0;
+            if (oldNum !== newNum) {
+                const oldValue = foundry.utils.getProperty(item, path);
+                if (spellSlotsLevel !== "none") {
+                    if (spellSlotsLevel === "locked") {
                         logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
                         pathBlocked = true;
-                    } else if (level === "request") {
+                    } else if (spellSlotsLevel === "request") {
+                        sendApprovalRequest(user, item.parent, `modify ${path} on ${item.name}`, {
+                            type: "updateItem",
+                            actorId: item.parent.id,
+                            itemId: item.id,
+                            changes: { [path]: newValue }
+                        });
+                        pathBlocked = true;
+                    }
+                } else if (inventoryLevel !== "none" && newNum < oldNum) {
+                    if (inventoryLevel === "locked") {
+                        logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
+                        pathBlocked = true;
+                    } else if (inventoryLevel === "request") {
                         sendApprovalRequest(user, item.parent, `recover uses via ${path} on ${item.name}`, {
                             type: "updateItem",
                             actorId: item.parent.id,
@@ -406,7 +528,6 @@ function onPreUpdateItem(item, changes, options, userId) {
                         pathBlocked = true;
                     }
                 }
-                // Increase or same = legitimate usage (spending), always allow
             }
             if (!pathBlocked) allowedFlat[path] = newValue;
             else anyBlocked = true;
@@ -455,7 +576,7 @@ function onPreUpdateItem(item, changes, options, userId) {
         }
 
         // Hit dice paths on class-type items (HP lock)
-        if (!pathBlocked && item.type === "class" && isLocked("hp", userId)) {
+        if (!pathBlocked && item.type === "class" && isLocked("hp", userId, "hitDice")) {
             for (const pattern of HIT_DICE_ITEM_PATHS) {
                 if (pattern.test(path)) {
                     logCheatAttempt(user, item, `${item.name} > ${path}`,
