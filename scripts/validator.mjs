@@ -131,28 +131,58 @@ export const pendingRequests = new Map();
 /* ============================================================ */
 
 /**
- * Cross-client registry of recent currency decreases that may be the "payer"
- * side of a legitimate trade.
+ * Bidirectional trade matching.
  *
- * When a non-GM player's currency DECREASES on any client, that client
- * broadcasts a socket message. All other clients receive it and add an entry
- * here. When a currency INCREASE is then detected on a different actor,
- * consumeTradeDecrease checks for a match and, if found, allows the increase.
+ * The core problem: preUpdateActor hooks fire independently on each client.
+ * If the receiver's hook fires before the payer's socket message arrives,
+ * a simple "wait for decrease then allow increase" approach fails.
  *
- * Key: "${path}:${amount}"  (e.g. "system.currency.gp:5")
- * Value: Array of { actorId, timestamp }
+ * Solution: maintain BOTH a pending-decrease table AND a pending-increase table.
+ * - When a decrease fires: first check if a blocked increase is already waiting.
+ *   If yes → immediately unblock it. If no → store the decrease for later.
+ * - When an increase fires with no immediate decrease match: store it as a
+ *   pending increase. If a matching decrease arrives (via socket or locally),
+ *   handleTradeSocket finds it and re-applies immediately.
+ * - Fallback: if no matching decrease arrives within 5 s, log as cheat.
+ *
+ * This means the ORDER of events doesn't matter — whichever side arrives
+ * first, the match is resolved correctly.
+ *
+ * Keys for both maps: "${path}:${amount}"  (e.g. "system.currency.gp:5")
  */
-const pendingTradeDecreases = new Map();
+const pendingTradeDecreases = new Map(); // Value: Array of { actorId, timestamp }
+const pendingTradeIncreases = new Map(); // Value: Array of { id, actorId, newValue, oldValue, level, user, timestamp }
 
 const TRADE_WINDOW_MS = 30_000;
 
-/** Called by the module's socket listener to register a remote trade decrease. */
+/**
+ * Called both locally (on the decreasing client) and via socket (on all other clients).
+ * First tries to unblock a waiting increase; otherwise stores the decrease for later.
+ */
 export function handleTradeSocket(data) {
     if (data?.type !== "lawful-trade-decrease") return;
-    const { path, amount, actorId, timestamp } = data;
+    const { path, amount, actorId: senderActorId, timestamp } = data;
     const key = `${path}:${amount}`;
+
+    // Can we immediately unblock a pending increase from a DIFFERENT actor?
+    const increases = pendingTradeIncreases.get(key);
+    if (increases?.length) {
+        const idx = increases.findIndex(e => e.actorId !== senderActorId);
+        if (idx >= 0) {
+            const entry = increases.splice(idx, 1)[0];
+            if (increases.length === 0) pendingTradeIncreases.delete(key);
+            // Re-apply the previously blocked increase
+            game.actors.get(entry.actorId)?.update(
+                { [path]: entry.newValue },
+                { lawfulApproved: true }
+            );
+            return; // Decrease consumed — don't store it
+        }
+    }
+
+    // No waiting increase — store the decrease so a future increase can match it
     if (!pendingTradeDecreases.has(key)) pendingTradeDecreases.set(key, []);
-    pendingTradeDecreases.get(key).push({ actorId, timestamp });
+    pendingTradeDecreases.get(key).push({ actorId: senderActorId, timestamp: timestamp ?? Date.now() });
     _cleanExpiredTrades();
 }
 
@@ -162,6 +192,11 @@ function _cleanExpiredTrades() {
         const fresh = entries.filter(e => e.timestamp > cutoff);
         if (fresh.length === 0) pendingTradeDecreases.delete(key);
         else pendingTradeDecreases.set(key, fresh);
+    }
+    for (const [key, entries] of pendingTradeIncreases) {
+        const fresh = entries.filter(e => e.timestamp > cutoff);
+        if (fresh.length === 0) pendingTradeIncreases.delete(key);
+        else pendingTradeIncreases.set(key, fresh);
     }
 }
 
@@ -360,11 +395,9 @@ function onPreUpdateActor(actor, changes, options, userId) {
             //   AND broadcast via socket so every other client also records the offer.
             //   (Foundry does not loop socket messages back to the sender, so we must
             //   call handleTradeSocket ourselves to register the decrease on this client.)
-            // - Increase → allow if a matching decrease from a DIFFERENT actor is already
-            //   in pendingTradeDecreases. If no match yet, block the update temporarily
-            //   and retry after 1 s — long enough for the socket message from the payer's
-            //   client to arrive. Re-apply via lawfulApproved if a match arrives; otherwise
-            //   treat as a cheat attempt.
+            // - Increase → allow immediately if a matching decrease is already registered.
+            //   If not, store as a pending increase; handleTradeSocket will unblock it
+            //   the moment the payer's decrease arrives. Fallback: 5 s cheat detection.
             if (mapping.category === "currency") {
                 if (newNum < oldNum) {
                     const tradeData = {
@@ -379,31 +412,41 @@ function onPreUpdateActor(actor, changes, options, userId) {
                     break; // Allow the decrease
                 }
                 if (newNum > oldNum) {
-                    if (consumeTradeDecrease(path, newNum - oldNum, actor.id)) break; // Trade — allow
-                    // No immediate match. The payer's socket message may not have arrived yet.
-                    // Block the update now; re-apply it once a matching offer is confirmed.
-                    const capturedPath  = path;
-                    const capturedOld   = oldValue;
-                    const capturedNew   = newValue;
-                    const capturedAmt   = newNum - oldNum;
-                    const capturedAId   = actor.id;
-                    const capturedUser  = user;
-                    const capturedLevel = level;
+                    if (consumeTradeDecrease(path, newNum - oldNum, actor.id)) break; // Immediate match — allow
+                    // No immediate match. Register this increase as pending so that
+                    // handleTradeSocket can unblock it the moment the payer's decrease
+                    // is recorded (whether from a local call or an incoming socket message).
+                    const amt    = newNum - oldNum;
+                    const incKey = `${path}:${amt}`;
+                    const incId  = foundry.utils.randomID();
+                    const incEntry = {
+                        id: incId, actorId: actor.id,
+                        newValue, oldValue, level, user,
+                        timestamp: Date.now()
+                    };
+                    if (!pendingTradeIncreases.has(incKey)) pendingTradeIncreases.set(incKey, []);
+                    pendingTradeIncreases.get(incKey).push(incEntry);
+
+                    // Fallback: if no matching decrease arrives within 5 s, treat as unauthorized
                     setTimeout(() => {
-                        const actorDoc = game.actors.get(capturedAId);
+                        const list = pendingTradeIncreases.get(incKey);
+                        if (!list) return;
+                        const idx = list.findIndex(e => e.id === incId);
+                        if (idx < 0) return; // Already matched and applied by handleTradeSocket
+                        list.splice(idx, 1);
+                        if (list.length === 0) pendingTradeIncreases.delete(incKey);
+                        const actorDoc = game.actors.get(incEntry.actorId);
                         if (!actorDoc) return;
-                        if (consumeTradeDecrease(capturedPath, capturedAmt, capturedAId)) {
-                            actorDoc.update({ [capturedPath]: capturedNew }, { lawfulApproved: true });
-                        } else if (capturedLevel === "locked") {
-                            logCheatAttempt(capturedUser, actorDoc, capturedPath, capturedOld, capturedNew);
-                        } else if (capturedLevel === "request") {
-                            sendApprovalRequest(capturedUser, actorDoc, `modify ${capturedPath}`, {
+                        if (incEntry.level === "locked") {
+                            logCheatAttempt(incEntry.user, actorDoc, path, incEntry.oldValue, incEntry.newValue);
+                        } else if (incEntry.level === "request") {
+                            sendApprovalRequest(incEntry.user, actorDoc, `modify ${path}`, {
                                 type: "actor",
-                                actorId: capturedAId,
-                                changes: { [capturedPath]: capturedNew }
+                                actorId: incEntry.actorId,
+                                changes: { [path]: incEntry.newValue }
                             });
                         }
-                    }, 1000);
+                    }, 5000);
                     deletePath(changes, path);
                     blocked = true;
                     break; // Don't fall through to the generic level check below
