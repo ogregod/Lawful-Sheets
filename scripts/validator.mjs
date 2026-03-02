@@ -356,25 +356,57 @@ function onPreUpdateActor(actor, changes, options, userId) {
             if (noRealChange) break;
 
             // Currency trade detection:
-            // - Decrease → always allow (paying in a trade / spending). Broadcast via socket
-            //   so every other client can record this as a pending trade offer.
-            // - Increase → allow only if a matching decrease from a DIFFERENT actor was
-            //   recently broadcast (i.e. it's the receive-side of a legitimate trade).
-            //   Otherwise fall through to the lock/block logic.
+            // - Decrease → always allow (paying in a trade / spending). Record locally
+            //   AND broadcast via socket so every other client also records the offer.
+            //   (Foundry does not loop socket messages back to the sender, so we must
+            //   call handleTradeSocket ourselves to register the decrease on this client.)
+            // - Increase → allow if a matching decrease from a DIFFERENT actor is already
+            //   in pendingTradeDecreases. If no match yet, block the update temporarily
+            //   and retry after 1 s — long enough for the socket message from the payer's
+            //   client to arrive. Re-apply via lawfulApproved if a match arrives; otherwise
+            //   treat as a cheat attempt.
             if (mapping.category === "currency") {
                 if (newNum < oldNum) {
-                    game.socket.emit(`module.${MODULE_ID}`, {
+                    const tradeData = {
                         type: "lawful-trade-decrease",
                         path,
                         amount: oldNum - newNum,
                         actorId: actor.id,
                         timestamp: Date.now()
-                    });
+                    };
+                    handleTradeSocket(tradeData);                        // Record on this client too
+                    game.socket.emit(`module.${MODULE_ID}`, tradeData); // Broadcast to other clients
                     break; // Allow the decrease
                 }
                 if (newNum > oldNum) {
-                    if (consumeTradeDecrease(path, newNum - oldNum, actor.id)) break; // Trade, allow
-                    // No matching trade offer — fall through to block/request
+                    if (consumeTradeDecrease(path, newNum - oldNum, actor.id)) break; // Trade — allow
+                    // No immediate match. The payer's socket message may not have arrived yet.
+                    // Block the update now; re-apply it once a matching offer is confirmed.
+                    const capturedPath  = path;
+                    const capturedOld   = oldValue;
+                    const capturedNew   = newValue;
+                    const capturedAmt   = newNum - oldNum;
+                    const capturedAId   = actor.id;
+                    const capturedUser  = user;
+                    const capturedLevel = level;
+                    setTimeout(() => {
+                        const actorDoc = game.actors.get(capturedAId);
+                        if (!actorDoc) return;
+                        if (consumeTradeDecrease(capturedPath, capturedAmt, capturedAId)) {
+                            actorDoc.update({ [capturedPath]: capturedNew }, { lawfulApproved: true });
+                        } else if (capturedLevel === "locked") {
+                            logCheatAttempt(capturedUser, actorDoc, capturedPath, capturedOld, capturedNew);
+                        } else if (capturedLevel === "request") {
+                            sendApprovalRequest(capturedUser, actorDoc, `modify ${capturedPath}`, {
+                                type: "actor",
+                                actorId: capturedAId,
+                                changes: { [capturedPath]: capturedNew }
+                            });
+                        }
+                    }, 1000);
+                    deletePath(changes, path);
+                    blocked = true;
+                    break; // Don't fall through to the generic level check below
                 }
             }
 
