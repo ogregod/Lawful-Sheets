@@ -163,6 +163,7 @@ export function handleTradeSocket(data) {
     if (data?.type !== "lawful-trade-decrease") return;
     const { path, amount, actorId: senderActorId, timestamp } = data;
     const key = `${path}:${amount}`;
+    console.log(`Lawful Sheets | Trade decrease received: ${key} from actor ${senderActorId}`);
 
     // Can we immediately unblock a pending increase from a DIFFERENT actor?
     const increases = pendingTradeIncreases.get(key);
@@ -171,6 +172,7 @@ export function handleTradeSocket(data) {
         if (idx >= 0) {
             const entry = increases.splice(idx, 1)[0];
             if (increases.length === 0) pendingTradeIncreases.delete(key);
+            console.log(`Lawful Sheets | Trade matched — unblocking increase on actor ${entry.actorId}`);
             // Re-apply the previously blocked increase
             game.actors.get(entry.actorId)?.update(
                 { [path]: entry.newValue },
@@ -407,6 +409,7 @@ function onPreUpdateActor(actor, changes, options, userId) {
                         actorId: actor.id,
                         timestamp: Date.now()
                     };
+                    console.log(`Lawful Sheets | Trade decrease detected: ${path} -${oldNum - newNum} on actor ${actor.id}`);
                     handleTradeSocket(tradeData);                        // Record on this client too
                     game.socket.emit(`module.${MODULE_ID}`, tradeData); // Broadcast to other clients
                     break; // Allow the decrease
@@ -424,6 +427,7 @@ function onPreUpdateActor(actor, changes, options, userId) {
                         newValue, oldValue, level, user,
                         timestamp: Date.now()
                     };
+                    console.log(`Lawful Sheets | Trade increase blocked (waiting for decrease): ${incKey} on actor ${actor.id}`);
                     if (!pendingTradeIncreases.has(incKey)) pendingTradeIncreases.set(incKey, []);
                     pendingTradeIncreases.get(incKey).push(incEntry);
 
