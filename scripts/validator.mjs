@@ -153,6 +153,10 @@ export const pendingRequests = new Map();
 const pendingTradeDecreases = new Map(); // Value: Array of { actorId, timestamp }
 const pendingTradeIncreases = new Map(); // Value: Array of { id, actorId, newValue, oldValue, level, user, timestamp }
 
+// Item trade tracking — same bidirectional pattern as currency
+const pendingItemTradeDeletes = new Map(); // Key: itemName, Value: Array of { actorId, timestamp }
+const pendingItemTradeCreates = new Map(); // Key: itemName, Value: Array of { id, actorId, itemData, level, user, timestamp }
+
 const TRADE_WINDOW_MS = 30_000;
 
 /**
@@ -160,32 +164,56 @@ const TRADE_WINDOW_MS = 30_000;
  * First tries to unblock a waiting increase; otherwise stores the decrease for later.
  */
 export function handleTradeSocket(data) {
-    if (data?.type !== "lawful-trade-decrease") return;
-    const { path, amount, actorId: senderActorId, timestamp } = data;
-    const key = `${path}:${amount}`;
-    console.log(`Lawful Sheets | Trade decrease received: ${key} from actor ${senderActorId}`);
+    if (!data?.type) return;
 
-    // Can we immediately unblock a pending increase from a DIFFERENT actor?
-    const increases = pendingTradeIncreases.get(key);
-    if (increases?.length) {
-        const idx = increases.findIndex(e => e.actorId !== senderActorId);
-        if (idx >= 0) {
-            const entry = increases.splice(idx, 1)[0];
-            if (increases.length === 0) pendingTradeIncreases.delete(key);
-            console.log(`Lawful Sheets | Trade matched — unblocking increase on actor ${entry.actorId}`);
-            // Re-apply the previously blocked increase
-            game.actors.get(entry.actorId)?.update(
-                { [path]: entry.newValue },
-                { lawfulApproved: true }
-            );
-            return; // Decrease consumed — don't store it
+    if (data.type === "lawful-trade-decrease") {
+        const { path, amount, actorId: senderActorId, timestamp } = data;
+        const key = `${path}:${amount}`;
+        console.log(`Lawful Sheets | Trade decrease received: ${key} from actor ${senderActorId}`);
+
+        // Can we immediately unblock a pending increase from a DIFFERENT actor?
+        const increases = pendingTradeIncreases.get(key);
+        if (increases?.length) {
+            const idx = increases.findIndex(e => e.actorId !== senderActorId);
+            if (idx >= 0) {
+                const entry = increases.splice(idx, 1)[0];
+                if (increases.length === 0) pendingTradeIncreases.delete(key);
+                console.log(`Lawful Sheets | Trade matched — unblocking increase on actor ${entry.actorId}`);
+                game.actors.get(entry.actorId)?.update(
+                    { [path]: entry.newValue },
+                    { lawfulApproved: true }
+                );
+                return;
+            }
         }
-    }
 
-    // No waiting increase — store the decrease so a future increase can match it
-    if (!pendingTradeDecreases.has(key)) pendingTradeDecreases.set(key, []);
-    pendingTradeDecreases.get(key).push({ actorId: senderActorId, timestamp: timestamp ?? Date.now() });
-    _cleanExpiredTrades();
+        if (!pendingTradeDecreases.has(key)) pendingTradeDecreases.set(key, []);
+        pendingTradeDecreases.get(key).push({ actorId: senderActorId, timestamp: timestamp ?? Date.now() });
+        _cleanExpiredTrades();
+
+    } else if (data.type === "lawful-item-delete") {
+        const { actorId: senderActorId, itemName, timestamp } = data;
+        console.log(`Lawful Sheets | Item delete received: "${itemName}" from actor ${senderActorId}`);
+
+        // Can we immediately unblock a pending create from a DIFFERENT actor?
+        const creates = pendingItemTradeCreates.get(itemName);
+        if (creates?.length) {
+            const idx = creates.findIndex(e => e.actorId !== senderActorId);
+            if (idx >= 0) {
+                const entry = creates.splice(idx, 1)[0];
+                if (creates.length === 0) pendingItemTradeCreates.delete(itemName);
+                console.log(`Lawful Sheets | Item trade matched — unblocking create on actor ${entry.actorId}`);
+                const createData = foundry.utils.deepClone(entry.itemData);
+                delete createData._id;
+                game.actors.get(entry.actorId)?.createEmbeddedDocuments("Item", [createData], { lawfulApproved: true });
+                return;
+            }
+        }
+
+        if (!pendingItemTradeDeletes.has(itemName)) pendingItemTradeDeletes.set(itemName, []);
+        pendingItemTradeDeletes.get(itemName).push({ actorId: senderActorId, timestamp: timestamp ?? Date.now() });
+        _cleanExpiredTrades();
+    }
 }
 
 function _cleanExpiredTrades() {
@@ -199,6 +227,16 @@ function _cleanExpiredTrades() {
         const fresh = entries.filter(e => e.timestamp > cutoff);
         if (fresh.length === 0) pendingTradeIncreases.delete(key);
         else pendingTradeIncreases.set(key, fresh);
+    }
+    for (const [key, entries] of pendingItemTradeDeletes) {
+        const fresh = entries.filter(e => e.timestamp > cutoff);
+        if (fresh.length === 0) pendingItemTradeDeletes.delete(key);
+        else pendingItemTradeDeletes.set(key, fresh);
+    }
+    for (const [key, entries] of pendingItemTradeCreates) {
+        const fresh = entries.filter(e => e.timestamp > cutoff);
+        if (fresh.length === 0) pendingItemTradeCreates.delete(key);
+        else pendingItemTradeCreates.set(key, fresh);
     }
 }
 
@@ -217,6 +255,23 @@ function consumeTradeDecrease(path, amount, receiverActorId) {
     if (idx < 0) return false;
     entries.splice(idx, 1);
     if (entries.length === 0) pendingTradeDecreases.delete(key);
+    return true;
+}
+
+/**
+ * Check whether an item creation on receiverActorId can be matched against
+ * a pending item delete of the same name from a different actor.
+ * Consumes the match if found.
+ * @returns {boolean} true if this creation is part of a legitimate trade
+ */
+function consumeItemTradeDelete(receiverActorId, itemName) {
+    _cleanExpiredTrades();
+    const entries = pendingItemTradeDeletes.get(itemName);
+    if (!entries || entries.length === 0) return false;
+    const idx = entries.findIndex(e => e.actorId !== receiverActorId);
+    if (idx < 0) return false;
+    entries.splice(idx, 1);
+    if (entries.length === 0) pendingItemTradeDeletes.delete(itemName);
     return true;
 }
 
@@ -695,10 +750,36 @@ function onPreCreateItem(item, data, options, userId) {
 
     const level = getLockLevel("inventory", userId, "addItems");
     if (level === "locked") {
-        logCheatAttempt(user, item.parent, `Create item: ${data.name || "unknown"}`, "N/A", "new item");
+        // Allow immediately if a matching item delete from a different actor is already recorded
+        if (consumeItemTradeDelete(item.parent.id, data.name)) return;
+
+        // No immediate match — store as pending; handleTradeSocket will unblock it when
+        // the sender's delete socket message arrives. Fallback: log cheat after 5 s.
+        const incId = foundry.utils.randomID();
+        const incEntry = { id: incId, actorId: item.parent.id, itemData: data, level, user, timestamp: Date.now() };
+        const pendingKey = data.name ?? "unknown";
+        console.log(`Lawful Sheets | Item create blocked (waiting for delete): "${pendingKey}" on actor ${item.parent.id}`);
+        if (!pendingItemTradeCreates.has(pendingKey)) pendingItemTradeCreates.set(pendingKey, []);
+        pendingItemTradeCreates.get(pendingKey).push(incEntry);
+
+        setTimeout(() => {
+            const list = pendingItemTradeCreates.get(pendingKey);
+            if (!list) return;
+            const idx = list.findIndex(e => e.id === incId);
+            if (idx < 0) return; // Already matched by handleTradeSocket
+            list.splice(idx, 1);
+            if (list.length === 0) pendingItemTradeCreates.delete(pendingKey);
+            const actorDoc = game.actors.get(incEntry.actorId);
+            if (!actorDoc) return;
+            logCheatAttempt(incEntry.user, actorDoc, `Create item: ${data.name || "unknown"}`, "N/A", "new item");
+        }, 5000);
+
         return false;
     }
     if (level === "request") {
+        // Allow immediately if a matching item delete from a different actor is already recorded
+        if (consumeItemTradeDelete(item.parent.id, data.name)) return;
+
         sendApprovalRequest(user, item.parent, `add "${data.name || "item"}" to inventory`, {
             type: "createItem",
             actorId: item.parent.id,
@@ -717,33 +798,43 @@ function onPreDeleteItem(item, options, userId) {
 
     const user = game.users.get(userId);
     if (!user || user.role >= 3) return;
-    if (isWhitelistedSource(options)) return;
 
-    const level = getLockLevel("inventory", userId, "deleteItems");
-    if (level === "none") return;
+    // Apply blocking logic only if source is not whitelisted
+    if (!isWhitelistedSource(options)) {
+        const level = getLockLevel("inventory", userId, "deleteItems");
+        if (level !== "none") {
+            const quantity = item.system?.quantity ?? 0;
+            const usesValue = item.system?.uses?.value ?? null;
+            const isDepletedUses = usesValue !== null && usesValue <= 0;
 
-    const quantity = item.system?.quantity ?? 0;
-    const usesValue = item.system?.uses?.value ?? null;
-
-    // Always allow deletion of the last item (consumption)
-    if (quantity <= 1) return;
-
-    // Always allow deletion when uses are depleted
-    if (usesValue !== null && usesValue <= 0) return;
-
-    // Stack with remaining items — check lock level
-    if (level === "locked") {
-        logCheatAttempt(user, item.parent, `Delete item: ${item.name} (qty: ${quantity})`, item.name, "deleted");
-        return false;
+            // Only block stacks with remaining uses — single items and depleted stacks are allowed
+            if (quantity > 1 && !isDepletedUses) {
+                if (level === "locked") {
+                    logCheatAttempt(user, item.parent, `Delete item: ${item.name} (qty: ${quantity})`, item.name, "deleted");
+                    return false;
+                }
+                if (level === "request") {
+                    sendApprovalRequest(user, item.parent, `delete "${item.name}" (qty: ${quantity})`, {
+                        type: "deleteItem",
+                        actorId: item.parent.id,
+                        itemId: item.id
+                    });
+                    return false;
+                }
+            }
+        }
     }
-    if (level === "request") {
-        sendApprovalRequest(user, item.parent, `delete "${item.name}" (qty: ${quantity})`, {
-            type: "deleteItem",
-            actorId: item.parent.id,
-            itemId: item.id
-        });
-        return false;
-    }
+
+    // Deletion is allowed — broadcast for item trade detection so the receiver's
+    // preCreateItem can match this against an incoming item creation.
+    const deleteTradeData = {
+        type: "lawful-item-delete",
+        actorId: item.parent.id,
+        itemName: item.name,
+        timestamp: Date.now()
+    };
+    handleTradeSocket(deleteTradeData);                        // Register on this client too
+    game.socket.emit(`module.${MODULE_ID}`, deleteTradeData); // Broadcast to other clients
 }
 
 /* ============================================================ */
