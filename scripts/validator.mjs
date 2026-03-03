@@ -195,17 +195,18 @@ export function handleTradeSocket(data) {
         const { actorId: senderActorId, itemName, timestamp } = data;
         console.log(`Lawful Sheets | Item delete received: "${itemName}" from actor ${senderActorId}`);
 
-        // Can we immediately unblock a pending create from a DIFFERENT actor?
+        // Can we match a pending blocked create from a DIFFERENT actor?
         const creates = pendingItemTradeCreates.get(itemName);
         if (creates?.length) {
             const idx = creates.findIndex(e => e.actorId !== senderActorId);
             if (idx >= 0) {
                 const entry = creates.splice(idx, 1)[0];
                 if (creates.length === 0) pendingItemTradeCreates.delete(itemName);
-                console.log(`Lawful Sheets | Item trade matched — unblocking create on actor ${entry.actorId}`);
-                const createData = foundry.utils.deepClone(entry.itemData);
-                delete createData._id;
-                game.actors.get(entry.actorId)?.createEmbeddedDocuments("Item", [createData], { lawfulApproved: true });
+                // Trade confirmed — remove the pending entry so the 5-second fallback
+                // does NOT log a cheat. We do NOT re-create the item here because
+                // Item Piles routes creation through the GM, which bypasses player hooks;
+                // re-creating would cause duplicates.
+                console.log(`Lawful Sheets | Item trade matched — suppressing cheat alert for "${itemName}" on actor ${entry.actorId}`);
                 return;
             }
         }
@@ -588,7 +589,10 @@ function onPreUpdateItem(item, changes, options, userId) {
             const newNum = Number(newValue) || 0;
             if (oldNum !== newNum) {
                 const oldValue = foundry.utils.getProperty(item, path);
-                if (spellSlotsLevel !== "none") {
+                const isUsesValue = /^system\.uses\.value$/.test(path);
+                // Spell-slots lock governs uses.value (charges/slots) in both directions.
+                // Regular item quantity is only subject to the inventory quantity lock.
+                if (isUsesValue && spellSlotsLevel !== "none") {
                     if (spellSlotsLevel === "locked") {
                         logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
                         pathBlocked = true;
@@ -616,8 +620,22 @@ function onPreUpdateItem(item, changes, options, userId) {
                     }
                 }
             }
-            if (!pathBlocked) allowedFlat[path] = newValue;
-            else anyBlocked = true;
+            if (!pathBlocked) {
+                allowedFlat[path] = newValue;
+                // A quantity decrease means the player sent items to another actor.
+                // Broadcast via socket so the receiver's preCreateItem can match it
+                // and suppress the false cheat alert on the receiving side.
+                if (/^system\.quantity$/.test(path) && oldNum > newNum) {
+                    const deleteTradeData = {
+                        type: "lawful-item-delete",
+                        actorId: item.parent.id,
+                        itemName: item.name,
+                        timestamp: Date.now()
+                    };
+                    handleTradeSocket(deleteTradeData);
+                    game.socket.emit(`module.${MODULE_ID}`, deleteTradeData);
+                }
+            } else anyBlocked = true;
             continue;
         }
 
@@ -674,18 +692,25 @@ function onPreUpdateItem(item, changes, options, userId) {
             const level = getLockLevel("inventory", userId, subMatch.subId);
             if (level !== "none") {
                 const oldValue = foundry.utils.getProperty(item, path);
-                if (level === "locked") {
-                    logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
-                    pathBlocked = true;
-                } else if (level === "request") {
-                    const labels = { equip: "equip/unequip", prepared: "change prepared state", quantity: "modify uses" };
-                    sendApprovalRequest(user, item.parent, `${labels[subMatch.subId] ?? path} on ${item.name}`, {
-                        type: "updateItem",
-                        actorId: item.parent.id,
-                        itemId: item.id,
-                        changes: { [path]: newValue }
-                    });
-                    pathBlocked = true;
+                // Skip if the value hasn't actually changed.
+                // Foundry (and some modules) sometimes include unchanged fields in batch updates.
+                const oldNum = Number(oldValue ?? 0);
+                const newNum = Number(newValue ?? 0);
+                const noRealChange = oldValue === newValue || (!isNaN(oldNum) && !isNaN(newNum) && oldNum === newNum);
+                if (!noRealChange) {
+                    if (level === "locked") {
+                        logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
+                        pathBlocked = true;
+                    } else if (level === "request") {
+                        const labels = { equip: "equip/unequip", prepared: "change prepared state", quantity: "modify uses" };
+                        sendApprovalRequest(user, item.parent, `${labels[subMatch.subId] ?? path} on ${item.name}`, {
+                            type: "updateItem",
+                            actorId: item.parent.id,
+                            itemId: item.id,
+                            changes: { [path]: newValue }
+                        });
+                        pathBlocked = true;
+                    }
                 }
             }
             if (!pathBlocked) allowedFlat[path] = newValue;
@@ -750,11 +775,13 @@ function onPreCreateItem(item, data, options, userId) {
 
     const level = getLockLevel("inventory", userId, "addItems");
     if (level === "locked") {
-        // Allow immediately if a matching item delete from a different actor is already recorded
-        if (consumeItemTradeDelete(item.parent.id, data.name)) return;
+        // If a matching quantity-decrease (or delete) from a different actor was already
+        // recorded, this is a legitimate trade. Block the player's direct call silently —
+        // Item Piles routes the actual creation through the GM, which bypasses our hooks.
+        if (consumeItemTradeDelete(item.parent.id, data.name)) return false;
 
-        // No immediate match — store as pending; handleTradeSocket will unblock it when
-        // the sender's delete socket message arrives. Fallback: log cheat after 5 s.
+        // No immediate match — store as pending; handleTradeSocket will match it when
+        // the sender's socket message arrives and remove it before the fallback fires.
         const incId = foundry.utils.randomID();
         const incEntry = { id: incId, actorId: item.parent.id, itemData: data, level, user, timestamp: Date.now() };
         const pendingKey = data.name ?? "unknown";
@@ -777,8 +804,8 @@ function onPreCreateItem(item, data, options, userId) {
         return false;
     }
     if (level === "request") {
-        // Allow immediately if a matching item delete from a different actor is already recorded
-        if (consumeItemTradeDelete(item.parent.id, data.name)) return;
+        // Same trade-detection bypass as "locked" above
+        if (consumeItemTradeDelete(item.parent.id, data.name)) return false;
 
         sendApprovalRequest(user, item.parent, `add "${data.name || "item"}" to inventory`, {
             type: "createItem",

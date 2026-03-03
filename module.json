@@ -1,7 +1,7 @@
 {
   "id": "lawful-sheets",
   "title": "Lawful Sheets",
-  "version": "1.0.63",
+  "version": "1.0.64",
   "socket": true,
   "compatibility": {
     "minimum": 13,
@@ -34,5 +34,5 @@
   "description": "Enforces strict editing rules for Players with hook-based validation. Prevents cheating on character sheets with CSS enforcement and client-side hook validation.",
   "url": "https://github.com/ogregod/Lawful-Sheets",
   "manifest": "https://raw.githubusercontent.com/ogregod/Lawful-Sheets/main/module.json",
-  "download": "https://github.com/ogregod/Lawful-Sheets/releases/download/1.0.63/lawful-sheets-v1.0.63.zip"
+  "download": "https://github.com/ogregod/Lawful-Sheets/releases/download/1.0.64/lawful-sheets-v1.0.64.zip"
 }
