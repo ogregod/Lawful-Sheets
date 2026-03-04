@@ -202,11 +202,14 @@ export function handleTradeSocket(data) {
             if (idx >= 0) {
                 const entry = creates.splice(idx, 1)[0];
                 if (creates.length === 0) pendingItemTradeCreates.delete(itemName);
-                // Trade confirmed — remove the pending entry so the 5-second fallback
-                // does NOT log a cheat. We do NOT re-create the item here because
-                // Item Piles routes creation through the GM, which bypasses player hooks;
-                // re-creating would cause duplicates.
-                console.log(`Lawful Sheets | Item trade matched — suppressing cheat alert for "${itemName}" on actor ${entry.actorId}`);
+                // Trade confirmed — re-create the item. The original preCreateItem call
+                // returned false (blocking the player's attempt), so we must create it
+                // here. This runs only on the receiver's client (the only client that
+                // stored the pending entry), so there is no risk of duplicates.
+                console.log(`Lawful Sheets | Item trade matched — creating "${itemName}" on actor ${entry.actorId}`);
+                const createData = foundry.utils.deepClone(entry.itemData);
+                delete createData._id;
+                game.actors.get(entry.actorId)?.createEmbeddedDocuments("Item", [createData], { lawfulApproved: true });
                 return;
             }
         }
@@ -776,9 +779,9 @@ function onPreCreateItem(item, data, options, userId) {
     const level = getLockLevel("inventory", userId, "addItems");
     if (level === "locked") {
         // If a matching quantity-decrease (or delete) from a different actor was already
-        // recorded, this is a legitimate trade. Block the player's direct call silently —
-        // Item Piles routes the actual creation through the GM, which bypasses our hooks.
-        if (consumeItemTradeDelete(item.parent.id, data.name)) return false;
+        // recorded, this is a legitimate trade. Allow the creation — Item Piles uses the
+        // receiver's own player client to create the item, so we must let it through.
+        if (consumeItemTradeDelete(item.parent.id, data.name)) return;
 
         // No immediate match — store as pending; handleTradeSocket will match it when
         // the sender's socket message arrives and remove it before the fallback fires.
@@ -804,8 +807,8 @@ function onPreCreateItem(item, data, options, userId) {
         return false;
     }
     if (level === "request") {
-        // Same trade-detection bypass as "locked" above
-        if (consumeItemTradeDelete(item.parent.id, data.name)) return false;
+        // Same trade-detection bypass as "locked" above — allow the creation through
+        if (consumeItemTradeDelete(item.parent.id, data.name)) return;
 
         sendApprovalRequest(user, item.parent, `add "${data.name || "item"}" to inventory`, {
             type: "createItem",
