@@ -154,8 +154,9 @@ const pendingTradeDecreases = new Map(); // Value: Array of { actorId, timestamp
 const pendingTradeIncreases = new Map(); // Value: Array of { id, actorId, newValue, oldValue, level, user, timestamp }
 
 // Item trade tracking — same bidirectional pattern as currency
-const pendingItemTradeDeletes = new Map(); // Key: itemName, Value: Array of { actorId, timestamp }
-const pendingItemTradeCreates = new Map(); // Key: itemName, Value: Array of { id, actorId, itemData, level, user, timestamp }
+const pendingItemTradeDeletes  = new Map(); // Key: itemName, Value: Array of { actorId, timestamp }
+const pendingItemTradeCreates  = new Map(); // Key: itemName, Value: Array of { id, actorId, itemData, level, user, timestamp }
+const pendingItemTradeIncreases = new Map(); // Key: itemName, Value: Array of { id, actorId, itemId, newQty, level, user, timestamp }
 
 const TRADE_WINDOW_MS = 30_000;
 
@@ -214,6 +215,22 @@ export function handleTradeSocket(data) {
             }
         }
 
+        // Can we match a pending blocked qty-increase from a DIFFERENT actor? (item merge trade)
+        const qtyIncreases = pendingItemTradeIncreases.get(itemName);
+        if (qtyIncreases?.length) {
+            const idx = qtyIncreases.findIndex(e => e.actorId !== senderActorId);
+            if (idx >= 0) {
+                const entry = qtyIncreases.splice(idx, 1)[0];
+                if (qtyIncreases.length === 0) pendingItemTradeIncreases.delete(itemName);
+                console.log(`Lawful Sheets | Item qty trade matched — updating "${itemName}" on actor ${entry.actorId}`);
+                game.actors.get(entry.actorId)?.items.get(entry.itemId)?.update(
+                    { "system.quantity": entry.newQty },
+                    { lawfulApproved: true }
+                );
+                return;
+            }
+        }
+
         if (!pendingItemTradeDeletes.has(itemName)) pendingItemTradeDeletes.set(itemName, []);
         pendingItemTradeDeletes.get(itemName).push({ actorId: senderActorId, timestamp: timestamp ?? Date.now() });
         _cleanExpiredTrades();
@@ -241,6 +258,11 @@ function _cleanExpiredTrades() {
         const fresh = entries.filter(e => e.timestamp > cutoff);
         if (fresh.length === 0) pendingItemTradeCreates.delete(key);
         else pendingItemTradeCreates.set(key, fresh);
+    }
+    for (const [key, entries] of pendingItemTradeIncreases) {
+        const fresh = entries.filter(e => e.timestamp > cutoff);
+        if (fresh.length === 0) pendingItemTradeIncreases.delete(key);
+        else pendingItemTradeIncreases.set(key, fresh);
     }
 }
 
@@ -609,17 +631,54 @@ function onPreUpdateItem(item, changes, options, userId) {
                         pathBlocked = true;
                     }
                 } else if (inventoryLevel !== "none" && newNum > oldNum) {
-                    if (inventoryLevel === "locked") {
-                        logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
+                    const isQtyPath = /^system\.quantity$/.test(path);
+                    if (isQtyPath && consumeItemTradeDelete(item.parent.id, item.name)) {
+                        // Immediate trade match — allow the quantity increase
+                    } else if (isQtyPath) {
+                        // No immediate match — store pending; handleTradeSocket will re-apply
+                        // the update when the sender's delete signal arrives.
+                        const incId = foundry.utils.randomID();
+                        const itemName = item.name;
+                        const itemId = item.id;
+                        const actorId = item.parent.id;
+                        const incEntry = { id: incId, actorId, itemId, newQty: newNum, level: inventoryLevel, user, timestamp: Date.now() };
+                        if (!pendingItemTradeIncreases.has(itemName)) pendingItemTradeIncreases.set(itemName, []);
+                        pendingItemTradeIncreases.get(itemName).push(incEntry);
+                        console.log(`Lawful Sheets | Qty increase blocked (waiting for delete): "${itemName}" on actor ${actorId}`);
+                        setTimeout(() => {
+                            const list = pendingItemTradeIncreases.get(itemName);
+                            if (!list) return;
+                            const idx = list.findIndex(e => e.id === incId);
+                            if (idx < 0) return; // Already matched by handleTradeSocket
+                            list.splice(idx, 1);
+                            if (list.length === 0) pendingItemTradeIncreases.delete(itemName);
+                            const actorDoc = game.actors.get(actorId);
+                            if (!actorDoc) return;
+                            if (incEntry.level === "locked") {
+                                logCheatAttempt(incEntry.user, actorDoc, `${itemName} > ${path}`, oldNum, newNum);
+                            } else if (incEntry.level === "request") {
+                                sendApprovalRequest(incEntry.user, actorDoc, `increase ${path} on ${itemName}`, {
+                                    type: "updateItem",
+                                    actorId,
+                                    itemId,
+                                    changes: { [path]: newNum }
+                                });
+                            }
+                        }, 5000);
                         pathBlocked = true;
-                    } else if (inventoryLevel === "request") {
-                        sendApprovalRequest(user, item.parent, `increase ${path} on ${item.name}`, {
-                            type: "updateItem",
-                            actorId: item.parent.id,
-                            itemId: item.id,
-                            changes: { [path]: newValue }
-                        });
-                        pathBlocked = true;
+                    } else {
+                        if (inventoryLevel === "locked") {
+                            logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
+                            pathBlocked = true;
+                        } else if (inventoryLevel === "request") {
+                            sendApprovalRequest(user, item.parent, `increase ${path} on ${item.name}`, {
+                                type: "updateItem",
+                                actorId: item.parent.id,
+                                itemId: item.id,
+                                changes: { [path]: newValue }
+                            });
+                            pathBlocked = true;
+                        }
                     }
                 }
             }
@@ -829,7 +888,11 @@ function onPreDeleteItem(item, options, userId) {
     const user = game.users.get(userId);
     if (!user || user.role >= 3) return;
 
-    // Apply blocking logic only if source is not whitelisted
+    // Apply blocking logic only if source is not whitelisted.
+    // Note: stack deletions (qty > 1) are intentionally allowed because Item Piles
+    // deletes the sender's item when ALL quantity is traded. Blocking stacks would
+    // prevent the trade signal from being emitted and break item merge trades.
+    // Single-item (qty ≤ 1) non-depleted deletions are still blocked as cheating.
     if (!isWhitelistedSource(options)) {
         const level = getLockLevel("inventory", userId, "deleteItems");
         if (level !== "none") {
@@ -837,14 +900,13 @@ function onPreDeleteItem(item, options, userId) {
             const usesValue = item.system?.uses?.value ?? null;
             const isDepletedUses = usesValue !== null && usesValue <= 0;
 
-            // Only block stacks with remaining uses — single items and depleted stacks are allowed
-            if (quantity > 1 && !isDepletedUses) {
+            if (quantity <= 1 && !isDepletedUses) {
                 if (level === "locked") {
-                    logCheatAttempt(user, item.parent, `Delete item: ${item.name} (qty: ${quantity})`, item.name, "deleted");
+                    logCheatAttempt(user, item.parent, `Delete item: ${item.name}`, item.name, "deleted");
                     return false;
                 }
                 if (level === "request") {
-                    sendApprovalRequest(user, item.parent, `delete "${item.name}" (qty: ${quantity})`, {
+                    sendApprovalRequest(user, item.parent, `delete "${item.name}"`, {
                         type: "deleteItem",
                         actorId: item.parent.id,
                         itemId: item.id
