@@ -368,6 +368,9 @@ function isWhitelistedSource(options) {
     if (options.isHealing)  return true;
     if (options.isActivity) return true;
 
+    // dnd5e may nest activity context under a namespace in newer versions
+    if (options.dnd5e?.activityId) return true;
+
     return false;
 }
 
@@ -538,10 +541,16 @@ function onPreUpdateActor(actor, changes, options, userId) {
                 }
             }
 
-            // Spell slots: ALL manual changes are blocked regardless of direction.
-            // Legitimate consumption (casting spells) arrives with isActivity=true and
-            // is already whitelisted by isWhitelistedSource before reaching this point.
-            // Rests (isRest=true) are likewise whitelisted, so recovery still works.
+            // Spell slots/points & class resources: apply subtraction rule.
+            // Decreases (casting spells, spending ki, etc.) are legitimate usage.
+            // Increases (manually adding points) are blocked as cheating.
+            // Rests (isRest=true) are already whitelisted, so recovery still works.
+            // Third-party modules (e.g. dnd5e-spellpoints) may not set isActivity,
+            // so we cannot rely solely on the whitelist for these categories.
+            if (mapping.category === "spellSlots" || mapping.category === "resources") {
+                if (newNum <= oldNum) break; // Spending / consuming = allow
+                // Increase falls through to the generic lock check below
+            }
 
             if (level === "locked") {
                 logCheatAttempt(user, actor, path, oldValue, newValue);
@@ -615,9 +624,11 @@ function onPreUpdateItem(item, changes, options, userId) {
             if (oldNum !== newNum) {
                 const oldValue = foundry.utils.getProperty(item, path);
                 const isUsesValue = /^system\.uses\.value$/.test(path);
-                // Spell-slots lock governs uses.value (charges/slots) in both directions.
-                // Regular item quantity is only subject to the inventory quantity lock.
-                if (isUsesValue && spellSlotsLevel !== "none") {
+                // Spell-slots lock governs uses.value with subtraction rule:
+                // Decreases (using charges/casting) are legitimate, only increases are blocked.
+                // Third-party modules (e.g. dnd5e-spellpoints) call item.update() without
+                // isActivity, so we cannot block all directions.
+                if (isUsesValue && spellSlotsLevel !== "none" && newNum > oldNum) {
                     if (spellSlotsLevel === "locked") {
                         logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
                         pathBlocked = true;
@@ -703,10 +714,10 @@ function onPreUpdateItem(item, changes, options, userId) {
 
         // INVERSE NUMERIC PATHS (uses.spent)
         // In dnd5e v4, uses.value is derived as (max - spent).
-        // - spellSlots lock active → block ALL manual changes in both directions (same
-        //   logic as uses.value above; spell casting is whitelisted via isActivity).
-        // - spellSlots lock inactive → inverted subtraction rule: block decreases only
-        //   (reducing spent = recovering resources = cheating; increasing spent = using = OK).
+        // Inverted subtraction rule: block DECREASES only (reducing spent = recovering
+        // resources = cheating). Increases (spending/using) are always allowed.
+        // Third-party modules (e.g. dnd5e-spellpoints) call item.update() without
+        // isActivity, so we apply the subtraction rule rather than blocking all.
         const inverseNumericMatch = INVENTORY_INVERSE_NUMERIC_PATHS.some(p => p.test(path));
         if (inverseNumericMatch) {
             const inventoryLevel = getLockLevel("inventory", userId, "quantity");
@@ -715,12 +726,13 @@ function onPreUpdateItem(item, changes, options, userId) {
             const newNum = Number(newValue) || 0;
             if (oldNum !== newNum) {
                 const oldValue = foundry.utils.getProperty(item, path);
-                if (spellSlotsLevel !== "none") {
+                // spellSlots lock: block decreases (recovering = cheating), allow increases (using)
+                if (spellSlotsLevel !== "none" && newNum < oldNum) {
                     if (spellSlotsLevel === "locked") {
                         logCheatAttempt(user, item, `${item.name} > ${path}`, oldValue, newValue);
                         pathBlocked = true;
                     } else if (spellSlotsLevel === "request") {
-                        sendApprovalRequest(user, item.parent, `modify ${path} on ${item.name}`, {
+                        sendApprovalRequest(user, item.parent, `recover uses via ${path} on ${item.name}`, {
                             type: "updateItem",
                             actorId: item.parent.id,
                             itemId: item.id,
