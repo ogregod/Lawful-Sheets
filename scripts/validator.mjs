@@ -547,7 +547,7 @@ function onPreUpdateActor(actor, changes, options, userId) {
             // Rests (isRest=true) are already whitelisted, so recovery still works.
             // Third-party modules (e.g. dnd5e-spellpoints) may not set isActivity,
             // so we cannot rely solely on the whitelist for these categories.
-            if (mapping.category === "spellSlots" || mapping.category === "resources") {
+            if (mapping.category === "spellSlots" || mapping.category === "resources" || mapping.category === "hp") {
                 // Non-numeric values (objects) occur when dnd5e sends the full
                 // resources/spells object. We can't determine direction from objects,
                 // so allow them through — individual numeric sub-paths will be
