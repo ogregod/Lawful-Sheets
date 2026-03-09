@@ -548,6 +548,11 @@ function onPreUpdateActor(actor, changes, options, userId) {
             // Third-party modules (e.g. dnd5e-spellpoints) may not set isActivity,
             // so we cannot rely solely on the whitelist for these categories.
             if (mapping.category === "spellSlots" || mapping.category === "resources") {
+                // Non-numeric values (objects) occur when dnd5e sends the full
+                // resources/spells object. We can't determine direction from objects,
+                // so allow them through — individual numeric sub-paths will be
+                // validated separately if they appear as flattened keys.
+                if (isNaN(oldNum) || isNaN(newNum)) break;
                 if (newNum <= oldNum) break; // Spending / consuming = allow
                 // Increase falls through to the generic lock check below
             }
